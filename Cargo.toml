@@ -1,0 +1,22 @@
+[package]
+name = "fitsproof-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "fitsproof, compiled: enforce an LLM memory budget with a byte-counting allocator and prove it"
+license = "MIT"
+repository = "https://github.com/AnnasMazhar/fitsproof-rs"
+readme = "README.md"
+
+[[bin]]
+name = "fitsproof"
+path = "src/main.rs"
+
+[lib]
+name = "fitsproof"
+path = "src/lib.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

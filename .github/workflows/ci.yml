@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: internal-reference guard
+        run: bash scripts/check_no_internal_refs.sh
+      - name: test
+        run: cargo test --all-targets --all-features
+
+  static-binary:
+    name: static binary (musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: add musl target
+        run: rustup target add x86_64-unknown-linux-musl
+      - name: build
+        run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: prove it is static + record SHA256
+        run: |
+          set -eu
+          BIN=target/x86_64-unknown-linux-musl/release/fitsproof
+          file "$BIN"
+          ldd "$BIN" || true
+          if ldd "$BIN" 2>&1 | grep -q "=>"; then
+            echo "FAIL: binary links dynamic libraries"; exit 1
+          fi
+          sha256sum "$BIN" | tee fitsproof-musl.sha256
+          "$BIN" --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fitsproof-musl
+          path: |
+            target/x86_64-unknown-linux-musl/release/fitsproof
+            fitsproof-musl.sha256

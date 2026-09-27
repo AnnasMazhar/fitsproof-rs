@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+mutants.out*
+.mutants.toml.lock
+*.profraw
+/probe-results/
