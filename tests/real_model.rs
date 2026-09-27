@@ -103,12 +103,11 @@ fn real_gguf_model_plan_succeeds() {
     }
 
     let model_name = gguf_path
-        .rsplit('/')
-        .next()
-        .unwrap_or("unknown")
-        .trim_end_matches(".gguf");
+        .file_name()
+        .map(|s| s.to_string_lossy().trim_end_matches(".gguf").to_string())
+        .unwrap_or_else(|| "unknown".to_string());
 
-    let cfg = metadata_to_model_config(&meta, model_name)
+    let cfg = metadata_to_model_config(&meta, &model_name)
         .expect("must extract ModelConfig from real GGUF metadata");
 
     println!("  Extracted config: {cfg:?}");
