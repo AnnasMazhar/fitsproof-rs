@@ -20,7 +20,7 @@ Scope: byte-counting allocator ceiling + contract layer + evidence files. No `sr
 | `stress` (release) | 25 configs, `allocator_peak=0.0 MB` on **every** line, `0 violations, 0 silent mode changes`, exit 0 |
 | `probe` | exit 0: `memory_bandwidth_bps: 11509552038 (11.5 GB/s), gemm_throughput_flops: 595746551 (0.60 GFLOPS), memory_bytes: 33548316672` |
 | `serve` / unknown cmd | exit 2 with message (matches README) |
-| `cargo test --test real_model -- --nocapture` | real `hf_tobil_qmd-query-expansion-1.7B-q4_k_m.gguf`, v3, 311 tensors, `Predicted peak: 3.209 GB / Budget: 4.000 GB / Verdict: Fits` — reproduces EVIDENCE §5 exactly |
+| `cargo test --test real_model -- --nocapture` | real `hf_tobil_qmd-query-expansion-1.7B-q4_k_m.gguf`, GGUF format version 3, 311 tensors, `Predicted peak: 3.209 GB / Budget: 4.000 GB / Verdict: Fits` — reproduces EVIDENCE §5 exactly |
 | `bash scripts/check_no_internal_refs.sh` | `CLEAN`, exit 0 |
 
 ## 1. Findings
