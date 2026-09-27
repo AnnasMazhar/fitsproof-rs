@@ -23,6 +23,25 @@ use crate::cost::{self, QuantBits};
 use crate::model::ModelConfig;
 use crate::probe::MachineProfile;
 
+/// Minimum headroom required above the analytical peak prediction before a
+/// configuration is considered to fit.
+///
+/// The analytical cost model accounts for weights, KV cache, and activations,
+/// but cannot see three bypass classes of memory that the OS charges to the
+/// process: (1) direct `mmap`/System-allocator calls from native libraries,
+/// (2) thread stacks (8 MiB per thread on Linux by default), and
+/// (3) static data (.bss/.data, read-only DSO mappings).
+///
+/// Empirical measurement on the reference machine (ThinkStation P500) shows
+/// this gap is ≥ 60 MB after a single 64 MiB System allocation
+/// (see `tests/attack_harness.rs`).  64 MiB is used here to match that
+/// documented lower bound and give a round, auditable constant.
+///
+/// A plan whose predicted peak is within this margin of the budget is NOT a
+/// fit — it has no room for the residual process overhead the model cannot
+/// predict, which is precisely the failure mode fitsproof exists to prevent.
+pub const SAFETY_MARGIN_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
+
 /// The outcome of a resource plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -130,7 +149,7 @@ pub fn plan(
         (predicted_peak as f64 * 1.2) as u64,
     );
 
-    if predicted_peak <= budget_bytes {
+    if predicted_peak.saturating_add(SAFETY_MARGIN_BYTES) <= budget_bytes {
         return Ok(Plan {
             verdict: Verdict::Fits,
             predicted_peak_bytes: predicted_peak,
@@ -151,7 +170,7 @@ pub fn plan(
     if let Some(current_idx) = QUANT_ORDER.iter().position(|&q| q == quant) {
         for &q in &QUANT_ORDER[current_idx + 1..] {
             let dq = cost::estimate(cfg, machine, context_len, q, bandwidth_utilisation);
-            let fits = dq.total_peak_bytes <= budget_bytes;
+            let fits = dq.total_peak_bytes.saturating_add(SAFETY_MARGIN_BYTES) <= budget_bytes;
             degradations.push(DegradationStep {
                 kind: DegradationKind::LowerQuant,
                 description: format!("Use {q} instead of {quant}"),
@@ -166,7 +185,7 @@ pub fn plan(
     for divisor in [2usize, 4, 8] {
         let shorter = (context_len / divisor).max(1);
         let sc = cost::estimate(cfg, machine, shorter, quant, bandwidth_utilisation);
-        let fits = sc.total_peak_bytes <= budget_bytes;
+        let fits = sc.total_peak_bytes.saturating_add(SAFETY_MARGIN_BYTES) <= budget_bytes;
         degradations.push(DegradationStep {
             kind: DegradationKind::ShorterContext,
             description: format!(
@@ -325,6 +344,33 @@ mod tests {
         assert!(
             matches!(result, Err(PlanError::InvalidBudget(_))),
             "budget=0 must return PlanError::InvalidBudget"
+        );
+    }
+
+    /// Regression test: exact-boundary (predicted_peak == budget) must NOT return Fits.
+    ///
+    /// A zero-margin plan has no headroom for the residual OS overhead that the analytical
+    /// model cannot account for (System-allocator bypass, thread stacks, static data).
+    /// Removing SAFETY_MARGIN_BYTES from the fit condition and re-running this test must
+    /// cause it to fail — that is the regression guard.
+    ///
+    /// Before the fix: plan() used `predicted_peak <= budget_bytes`, which returned Fits
+    /// here. After the fix: `predicted_peak + SAFETY_MARGIN_BYTES <= budget_bytes` is
+    /// required, so budget == predicted_peak → not Fits.
+    #[test]
+    fn exact_boundary_is_not_a_fit() {
+        let cfg = ModelConfig::reference();
+        let m = ref_machine();
+        let cost_est = cost::estimate(&cfg, &m, 512, "none", 0.6);
+        let predicted_peak = cost_est.total_peak_bytes;
+        // Budget set exactly to predicted peak: zero margin.
+        let p = plan(&cfg, &m, 512, predicted_peak, "none", 0.6).unwrap();
+        assert_ne!(
+            p.verdict,
+            Verdict::Fits,
+            "exact-boundary plan (predicted_peak == budget, margin=0) must NOT return Fits; \
+             a zero-margin plan has no room for OS overhead (bypass class: mmap/thread-stacks/static). \
+             If this fails, SAFETY_MARGIN_BYTES was removed or the fit condition was weakened."
         );
     }
 
