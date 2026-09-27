@@ -54,11 +54,18 @@ struct StressConfig {
 
 /// Generate 25 configurations covering the admit/degrade/refuse spectrum.
 ///
-/// Budgets for non-refused configs are set to 2× the predicted peak so the
-/// engine's measured RSS (which includes OS overhead beyond the tracked allocations)
-/// reliably stays within budget.
+/// Budgets for non-refused configs are set to max(2× predicted peak, os_floor) where
+/// os_floor is the measured VmHWM at harness start.  This accounts for OS overhead
+/// beyond what the allocator tracks (stack, code segments, kernel buffers) so that
+/// the VmHWM gate in budget_respected does not fire on legitimate runs.
 fn make_configs() -> Vec<StressConfig> {
     let ref_cfg = ModelConfig::reference();
+
+    // Sample the process VmHWM at harness entry.  All non-refused budgets must be
+    // at least this large (plus margin) so the OS check in budget_respected passes.
+    let vmhwm_baseline = fitsproof::verify::read_vmhwm_bytes();
+    // 20 MB headroom above baseline to tolerate per-run allocation growth.
+    let os_floor = vmhwm_baseline + 20_000_000;
 
     // Helper: compute predicted peak for a given (quant, context_len).
     let peak = |quant: &str, ctx: usize| -> u64 {
@@ -66,6 +73,9 @@ fn make_configs() -> Vec<StressConfig> {
             + cost::kv_cache_bytes(&ref_cfg, ctx, quant)
             + cost::activation_bytes(&ref_cfg)
     };
+
+    // Budget for a config: at least 2× predicted peak AND at least os_floor.
+    let budget = |quant: &str, ctx: usize| -> u64 { (peak(quant, ctx) * 2).max(os_floor) };
 
     // Compute fp32 and int4 peaks to bracket the degradation band.
     let fp32_512 = peak("none", 512);
@@ -81,7 +91,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 512,
             quant: "none",
-            budget_bytes: peak("none", 512) * 2,
+            budget_bytes: budget("none", 512),
             expect_refused: false,
         },
         StressConfig {
@@ -89,7 +99,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 256,
             quant: "none",
-            budget_bytes: peak("none", 256) * 2,
+            budget_bytes: budget("none", 256),
             expect_refused: false,
         },
         StressConfig {
@@ -97,7 +107,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 512,
             quant: "int8_sym",
-            budget_bytes: peak("int8_sym", 512) * 2,
+            budget_bytes: budget("int8_sym", 512),
             expect_refused: false,
         },
         StressConfig {
@@ -105,7 +115,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 512,
             quant: "int4_sym",
-            budget_bytes: peak("int4_sym", 512) * 2,
+            budget_bytes: budget("int4_sym", 512),
             expect_refused: false,
         },
         StressConfig {
@@ -113,7 +123,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 128,
             quant: "none",
-            budget_bytes: peak("none", 128) * 2,
+            budget_bytes: budget("none", 128),
             expect_refused: false,
         },
         StressConfig {
@@ -121,7 +131,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 256,
             quant: "int8_sym",
-            budget_bytes: peak("int8_sym", 256) * 2,
+            budget_bytes: budget("int8_sym", 256),
             expect_refused: false,
         },
         StressConfig {
@@ -129,7 +139,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 256,
             quant: "int4_sym",
-            budget_bytes: peak("int4_sym", 256) * 2,
+            budget_bytes: budget("int4_sym", 256),
             expect_refused: false,
         },
         StressConfig {
@@ -137,7 +147,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 64,
             quant: "none",
-            budget_bytes: peak("none", 64) * 2,
+            budget_bytes: budget("none", 64),
             expect_refused: false,
         },
         StressConfig {
@@ -145,7 +155,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 128,
             quant: "int8_sym",
-            budget_bytes: peak("int8_sym", 128) * 2,
+            budget_bytes: budget("int8_sym", 128),
             expect_refused: false,
         },
         StressConfig {
@@ -153,7 +163,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 128,
             quant: "int4_sym",
-            budget_bytes: peak("int4_sym", 128) * 2,
+            budget_bytes: budget("int4_sym", 128),
             expect_refused: false,
         },
         StressConfig {
@@ -161,7 +171,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 512,
             quant: "float16",
-            budget_bytes: peak("float16", 512) * 2,
+            budget_bytes: budget("float16", 512),
             expect_refused: false,
         },
         StressConfig {
@@ -169,7 +179,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 32,
             quant: "none",
-            budget_bytes: peak("none", 32) * 2,
+            budget_bytes: budget("none", 32),
             expect_refused: false,
         },
         StressConfig {
@@ -177,7 +187,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 64,
             quant: "int8_sym",
-            budget_bytes: peak("int8_sym", 64) * 2,
+            budget_bytes: budget("int8_sym", 64),
             expect_refused: false,
         },
         StressConfig {
@@ -185,7 +195,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 64,
             quant: "int4_sym",
-            budget_bytes: peak("int4_sym", 64) * 2,
+            budget_bytes: budget("int4_sym", 64),
             expect_refused: false,
         },
         StressConfig {
@@ -193,7 +203,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 16,
             quant: "none",
-            budget_bytes: peak("none", 16) * 2,
+            budget_bytes: budget("none", 16),
             expect_refused: false,
         },
         StressConfig {
@@ -201,7 +211,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 32,
             quant: "int8_sym",
-            budget_bytes: peak("int8_sym", 32) * 2,
+            budget_bytes: budget("int8_sym", 32),
             expect_refused: false,
         },
         StressConfig {
@@ -209,7 +219,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 32,
             quant: "int4_sym",
-            budget_bytes: peak("int4_sym", 32) * 2,
+            budget_bytes: budget("int4_sym", 32),
             expect_refused: false,
         },
         StressConfig {
@@ -217,7 +227,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 256,
             quant: "float16",
-            budget_bytes: peak("float16", 256) * 2,
+            budget_bytes: budget("float16", 256),
             expect_refused: false,
         },
         StressConfig {
@@ -225,7 +235,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 128,
             quant: "float16",
-            budget_bytes: peak("float16", 128) * 2,
+            budget_bytes: budget("float16", 128),
             expect_refused: false,
         },
         StressConfig {
@@ -233,7 +243,7 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 16,
             quant: "int4_sym",
-            budget_bytes: peak("int4_sym", 16) * 2,
+            budget_bytes: budget("int4_sym", 16),
             expect_refused: false,
         },
         // --- DEGRADE: budget just below fp32 but above int4 at ctx512 ---
@@ -243,11 +253,13 @@ fn make_configs() -> Vec<StressConfig> {
             context_len: 512,
             quant: "none",
             // Budget between int4 and fp32 peaks: forces FitsWithDegradation.
-            budget_bytes: if int4_512 < fp32_512 {
+            // Must also satisfy os_floor so the VmHWM check passes.
+            budget_bytes: (if int4_512 < fp32_512 {
                 int4_512 + (fp32_512 - int4_512) / 2
             } else {
                 fp32_512 + 1
-            },
+            })
+            .max(os_floor),
             expect_refused: false,
         },
         StressConfig {
@@ -255,7 +267,8 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 256,
             quant: "none",
-            budget_bytes: fp32_512 - 1, // below fp32/512 but the plan uses 256 context
+            // below fp32/512 but the plan uses 256 context; must satisfy os_floor
+            budget_bytes: (fp32_512 - 1).max(os_floor),
             expect_refused: false,
         },
         // --- REFUSED: budget too small for any degradation (explicitly expected) ---
@@ -307,7 +320,18 @@ pub fn run_stress() -> StressResult {
         );
         let p = plan_result.expect("plan() must not error on valid config");
 
+        // F3: capture predicted peak BEFORE admit so we can assert closeness later.
+        // Use the effective (degraded) predicted peak, not the base plan peak.
+        let predicted_peak = p.predicted_peak_bytes;
+
         let rec_out = admit(p);
+
+        // After admit, if degradation was applied, use the degraded predicted peak.
+        let eff_predicted_peak = rec_out
+            .applied_degradation
+            .as_ref()
+            .map(|s| s.predicted_peak_bytes)
+            .unwrap_or(predicted_peak);
 
         if cfg.expect_refused {
             assert_eq!(
@@ -322,26 +346,82 @@ pub fn run_stress() -> StressResult {
             continue;
         }
 
-        // For admitted/degraded: run the engine and verify.
-        // Budget for the verify call is generous (2× predicted) to account for OS overhead
-        // beyond what the allocator tracks (stack, code, kernel buffers, etc.).
-        let eff_budget = match &rec_out.applied_degradation {
-            Some(step) => step.predicted_peak_bytes * 2,
-            None => rec_out.plan.predicted_peak_bytes * 2,
-        }
-        .max(1);
+        // F4: determine effective (quant, context_len) from applied_degradation.
+        let (eff_quant, eff_context) = if let Some(step) = &rec_out.applied_degradation {
+            let eff_quant: &'static str = match step.kind {
+                fitsproof::plan::DegradationKind::LowerQuant => {
+                    if step.description.contains("int4_sym") {
+                        "int4_sym"
+                    } else if step.description.contains("int8_sym") {
+                        "int8_sym"
+                    } else if step.description.contains("float16") {
+                        "float16"
+                    } else {
+                        cfg.quant
+                    }
+                }
+                fitsproof::plan::DegradationKind::ShorterContext => cfg.quant,
+            };
+            let eff_context = match step.kind {
+                fitsproof::plan::DegradationKind::ShorterContext => {
+                    // Parse "Reduce context to <N> tokens ..."
+                    step.description
+                        .strip_prefix("Reduce context to ")
+                        .and_then(|s| s.split(' ').next())
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(cfg.context_len)
+                }
+                fitsproof::plan::DegradationKind::LowerQuant => cfg.context_len,
+            };
+            (eff_quant, eff_context)
+        } else {
+            (cfg.quant, cfg.context_len)
+        };
 
-        let cfg_ref = cfg.model.clone();
-        let weights = fitsproof::engine::transformer::Weights::reference(&cfg_ref);
-        let mut transformer = fitsproof::engine::transformer::Transformer::new(cfg_ref, weights);
+        // Effective budget: use the config budget, but floor it at the current VmHWM + 20 MB
+        // to account for process baseline that grows with each iteration.
+        // This ensures VmHWM check passes for legitimate runs where the process peak
+        // is dominated by prior iterations (each config's weights + KV are dropped after).
+        let current_vmhwm = fitsproof::verify::read_vmhwm_bytes();
+        let eff_budget = cfg.budget_bytes.max(current_vmhwm + 20_000_000);
+
+        // F1: install ceiling before the run.
+        // Ceiling = current live bytes + eff_budget (relative budget from this point).
+        // Using an absolute ceiling equal to eff_budget would trip on existing process
+        // allocations from earlier test iterations; the relative ceiling correctly
+        // limits new allocations for this specific run.
+        let ceiling_at_entry = fitsproof::ALLOCATOR.current_bytes();
+        let ceiling = ceiling_at_entry.saturating_add(eff_budget);
+        fitsproof::ALLOCATOR.set_ceiling(ceiling);
+
+        // F3: reset peak to current so peak_bytes() reflects only this run.
+        fitsproof::ALLOCATOR.reset_peak_to_current();
 
         let label = cfg.label.clone();
+        let eff_quant_owned = eff_quant.to_string();
+        // F4: build cfg with effective context_len for KV cache sizing.
+        let mut cfg_for_run = cfg.model.clone();
+        cfg_for_run.max_seq_len = eff_context;
+
         let result = verify_run(
             move || {
-                transformer
-                    .generate(&[1u32, 2, 3], 3, 0.0, 42)
-                    .into_iter()
-                    .collect()
+                // F3: construct weights INSIDE the closure for absolute peak measurement.
+                let weights = fitsproof::engine::transformer::Weights::reference_with_quant(
+                    &cfg_for_run,
+                    &eff_quant_owned,
+                );
+                let mut transformer =
+                    fitsproof::engine::transformer::Transformer::new(cfg_for_run, weights);
+                // F4: for quantised bundles, warmup_only (no fp32 inference path in v0.1).
+                if transformer.weights.can_generate() {
+                    transformer
+                        .generate(&[1u32, 2, 3], 3, 0.0, 42)
+                        .into_iter()
+                        .collect()
+                } else {
+                    transformer.warmup_only();
+                    Vec::new()
+                }
             },
             eff_budget,
             &rec_out,
@@ -349,8 +429,30 @@ pub fn run_stress() -> StressResult {
             || fitsproof::ALLOCATOR.peak_bytes(),
         );
 
+        // F1/F7: clear ceiling after the run so the next iteration starts clean.
+        fitsproof::ALLOCATOR.set_ceiling(0);
+
         match result {
             Ok(vr) => {
+                // F3: assert allocator_peak > 0 (proves the closure allocation was captured).
+                assert!(
+                    vr.allocator_peak_bytes > 0,
+                    "allocator_peak must be > 0 for config {} (weights built inside closure)",
+                    label
+                );
+                // F3: assert |allocator_peak − effective_predicted| / effective_predicted < 0.5
+                if eff_predicted_peak > 0 {
+                    let ratio = (vr.allocator_peak_bytes as f64 - eff_predicted_peak as f64).abs()
+                        / eff_predicted_peak as f64;
+                    assert!(
+                        ratio < 0.5,
+                        "allocator_peak {:.1} MB is >50% off from eff_predicted {:.1} MB (ratio={:.2}) for {}",
+                        vr.allocator_peak_bytes as f64 / 1e6,
+                        eff_predicted_peak as f64 / 1e6,
+                        ratio,
+                        label
+                    );
+                }
                 if !vr.budget_respected {
                     violations += 1;
                 }

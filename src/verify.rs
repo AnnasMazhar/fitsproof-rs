@@ -7,6 +7,8 @@
 //!
 //! The delta is a **first-class output**, not a footnote.  It quantifies the
 //! gap between what the allocator knows about and what the OS actually recorded.
+//! This gap is the bypass class (mmap / thread-stacks / static data) documented
+//! in README Limitations.
 //!
 //! # Design
 //!
@@ -16,6 +18,16 @@
 //!
 //! A REFUSED `AdmitRecord` must not reach `verify_run` — that would be a contract
 //! violation.  `verify_run` asserts this and returns `Err`.
+//!
+//! # Ceiling and VmHWM (F1 / F7)
+//!
+//! When a ceiling is installed the global allocator refuses any allocation that
+//! would exceed it.  `std::fs::read_to_string` allocates through the global
+//! allocator, so reading `/proc/self/status` while a tight ceiling is active
+//! silently returns 0 (F7).  The fix: **always read VmHWM after clearing the
+//! ceiling** (`set_ceiling(0)`), then re-install the ceiling if needed.
+//! Callers that install a ceiling before `verify_run` must clear it and let
+//! `verify_run` re-install it from the budget field of the admit record.
 
 use crate::admit::{AdmitRecord, AdmitStatus};
 
@@ -24,15 +36,16 @@ use crate::admit::{AdmitRecord, AdmitStatus};
 pub struct VerifyRecord {
     /// Declared budget (bytes).
     pub budget_bytes: u64,
-    /// Peak bytes counted by the `TrackingAllocator`.
+    /// Peak bytes counted by the `TrackingAllocator` (absolute process high-water mark
+    /// at end of closure, not a delta — F3 fix).
     pub allocator_peak_bytes: u64,
     /// OS high-water mark from `/proc/self/status` `VmHWM` (bytes).
     pub vmhwm_bytes: u64,
     /// `vmhwm_bytes - allocator_peak_bytes`: OS overhead not visible to the allocator.
     pub delta_bytes: i64,
-    /// `allocator_peak_bytes <= budget_bytes`.
+    /// `allocator_peak_bytes <= budget_bytes && vmhwm_bytes <= budget_bytes` (F2 fix).
     pub budget_respected: bool,
-    /// `vmhwm_bytes <= budget_bytes` (separate check — OS and allocator may differ).
+    /// `vmhwm_bytes <= budget_bytes`.
     pub os_budget_respected: bool,
     /// True if a mode change occurred without an emit (should always be false).
     pub mode_changed_silently: bool,
@@ -40,6 +53,8 @@ pub struct VerifyRecord {
     pub elapsed_s: f64,
     /// Human-readable configuration label.
     pub config_label: String,
+    /// Human-readable description of which bound was violated (empty if respected).
+    pub violated_bound: String,
 }
 
 impl VerifyRecord {
@@ -61,7 +76,11 @@ impl VerifyRecord {
     }
 }
 
-/// Read `VmHWM` from `/proc/self/status` in bytes.
+/// Read `VmHWM` from `/proc/self/status` in bytes, using a stack-allocated buffer
+/// to avoid any heap allocation.
+///
+/// This avoids the F7 bug where a live tight ceiling would refuse the heap
+/// allocation inside `std::fs::read_to_string`, silently returning 0.
 ///
 /// Returns 0 if the file is absent or the field is not found.
 ///
@@ -69,32 +88,55 @@ impl VerifyRecord {
 ///
 /// Returning 0 always would make the delta always negative, hiding OS overhead.
 pub fn read_vmhwm_bytes() -> u64 {
-    if let Ok(content) = std::fs::read_to_string("/proc/self/status") {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("VmHWM:") {
-                let kb_str = rest.split_whitespace().next().unwrap_or("0");
-                if let Ok(kb) = kb_str.parse::<u64>() {
-                    return kb * 1024;
-                }
-            }
-        }
-    }
-    0
+    read_proc_status_field_kb(b"VmHWM:")
 }
 
 /// Read `VmRSS` (current RSS) from `/proc/self/status` in bytes.
 pub fn read_vmrss_bytes() -> u64 {
-    if let Ok(content) = std::fs::read_to_string("/proc/self/status") {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("VmRSS:") {
-                let kb_str = rest.split_whitespace().next().unwrap_or("0");
-                if let Ok(kb) = kb_str.parse::<u64>() {
-                    return kb * 1024;
-                }
-            }
-        }
+    read_proc_status_field_kb(b"VmRSS:")
+}
+
+/// Read a `kB`-valued field from `/proc/self/status` without heap allocation.
+///
+/// Uses a fixed 8 KiB stack buffer; the entire `/proc/self/status` file is
+/// well under 4 KiB in practice.
+fn read_proc_status_field_kb(field: &[u8]) -> u64 {
+    use std::fs::File;
+    use std::io::Read;
+
+    let mut buf = [0u8; 8192];
+    let n = match File::open("/proc/self/status").and_then(|mut f| f.read(&mut buf)) {
+        Ok(n) => n,
+        Err(_) => return 0,
+    };
+    let content = &buf[..n];
+
+    // Find the field prefix in the raw bytes.
+    let pos = content
+        .windows(field.len())
+        .position(|w| w == field)
+        .unwrap_or(usize::MAX);
+    if pos == usize::MAX {
+        return 0;
     }
-    0
+
+    // Skip the field name and parse the decimal integer.
+    let rest = &content[pos + field.len()..];
+    // Skip whitespace.
+    let rest = rest
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t')
+        .map(|i| &rest[i..])
+        .unwrap_or(rest);
+    // Read digits.
+    let end = rest
+        .iter()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let digits = &rest[..end];
+    // Parse as UTF-8 (safe: all ascii digits).
+    let s = std::str::from_utf8(digits).unwrap_or("0");
+    s.parse::<u64>().unwrap_or(0) * 1024
 }
 
 /// Errors from `verify_run`.
@@ -118,20 +160,31 @@ impl std::error::Error for VerifyError {}
 
 /// Run a generation closure, measure peak memory, and return a `VerifyRecord`.
 ///
-/// `allocator_peak_fn` is called BEFORE and AFTER the closure; the reported
-/// `allocator_peak_bytes` is the **delta** (peak_after - peak_before).
-/// This avoids false violations from allocations made by earlier tests in the
-/// same process (the global allocator's peak is monotonically non-decreasing).
+/// # F3 fix — meaningful allocator peak delta
+///
+/// `allocator_peak_bytes` is `peak_after - peak_before` where:
+/// - `peak_before` is sampled BEFORE the closure runs
+/// - `peak_after` is sampled AFTER the closure runs
+///
+/// Callers must construct all model weights *inside* the closure so those
+/// allocations raise `peak_after` above `peak_before`.  In a warm process this
+/// gives the net weight+KV-cache allocation, not the stale process HWM.
+///
+/// # F2 fix — both bounds gate the verdict
+///
+/// `budget_respected = allocator_peak_bytes <= budget_bytes && vmhwm <= budget_bytes`.
+/// The `violated_bound` field names which bound failed.
+///
+/// # F7 fix — VmHWM read after ceiling is cleared
+///
+/// VmHWM is read after `set_ceiling(0)` to avoid the ceiling blocking the
+/// heap allocation inside `std::fs::read_to_string`.  The caller must NOT
+/// re-install a ceiling between the closure and this read.
 ///
 /// # Contract
 ///
 /// - `admit_record` must NOT be `Refused`.  A refused plan must not reach execution.
 /// - VmHWM is read from `/proc/self/status`.
-///
-/// # Fault detected
-///
-/// If budget_bytes is 0, `budget_respected` would be trivially false.
-/// Tests verify this edge case explicitly.
 pub fn verify_run(
     f: impl FnOnce() -> Vec<u32>,
     budget_bytes: u64,
@@ -145,22 +198,50 @@ pub fn verify_run(
         ));
     }
 
-    // Sample allocator peak BEFORE the run.
+    // F3: sample peak BEFORE the closure to establish baseline.
     let peak_before = allocator_peak_fn();
 
     let t0 = std::time::Instant::now();
     let _tokens = f();
     let elapsed = t0.elapsed().as_secs_f64();
 
-    // Sample allocator peak AFTER the run.
+    // F3: sample peak AFTER. Delta = contribution from this closure's allocations.
     let peak_after = allocator_peak_fn();
-    // Delta peak: new allocations made during this run only.
     let allocator_peak = peak_after.saturating_sub(peak_before);
 
+    // Read VmHWM — ceiling is cleared in allocator_peak_fn, so no F7 blindness.
     let vmhwm = read_vmhwm_bytes();
-    let delta = vmhwm as i64 - peak_after as i64; // VmHWM vs total process peak
-    let budget_respected = allocator_peak <= budget_bytes;
+
+    let delta = vmhwm as i64 - allocator_peak as i64;
+
+    // F2 fix: both allocator and OS numbers gate the verdict.
+    let allocator_ok = allocator_peak <= budget_bytes;
     let os_budget_respected = vmhwm <= budget_bytes;
+    let budget_respected = allocator_ok && os_budget_respected;
+
+    let violated_bound = if budget_respected {
+        String::new()
+    } else if !allocator_ok && !os_budget_respected {
+        format!(
+            "allocator_peak {:.3} GB > budget {:.3} GB AND VmHWM {:.3} GB > budget",
+            allocator_peak as f64 / 1e9,
+            budget_bytes as f64 / 1e9,
+            vmhwm as f64 / 1e9,
+        )
+    } else if !allocator_ok {
+        format!(
+            "allocator_peak {:.3} GB > budget {:.3} GB",
+            allocator_peak as f64 / 1e9,
+            budget_bytes as f64 / 1e9,
+        )
+    } else {
+        format!(
+            "VmHWM {:.3} GB > budget {:.3} GB (off-allocator memory: mmap/thread-stacks/static)",
+            vmhwm as f64 / 1e9,
+            budget_bytes as f64 / 1e9,
+        )
+    };
+
     let mode_changed_silently = false;
 
     Ok(VerifyRecord {
@@ -173,6 +254,7 @@ pub fn verify_run(
         mode_changed_silently,
         elapsed_s: elapsed,
         config_label: config_label.to_string(),
+        violated_bound,
     })
 }
 
@@ -286,8 +368,8 @@ mod tests {
         let p = plan::plan(&cfg, &m, 512, 1_000_000_000, "none", 0.6).unwrap();
         let rec = admit(p);
 
-        // Inject a fake allocator that returns growing values: pre=0, post=1_000_000.
-        // The delta (post - pre) = 1_000_000 which exceeds the 100-byte budget.
+        // Fake allocator: first call (before) returns 0, second call (after) returns 1_000_000.
+        // Delta = 1_000_000 - 0 = 1_000_000 which exceeds the 100-byte budget.
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let cc = call_count.clone();
         let result = verify_run(
@@ -301,7 +383,7 @@ mod tests {
                     0
                 } else {
                     1_000_000
-                } // first call returns 0, second returns 1MB
+                }
             },
         );
         let vr = result.unwrap();
@@ -309,6 +391,7 @@ mod tests {
             !vr.budget_respected,
             "budget_respected must be false when allocator_peak > budget"
         );
+        assert!(!vr.violated_bound.is_empty(), "violated_bound must be set");
     }
 
     /// Fault detected: budget_respected is false when everything fits.
@@ -319,7 +402,7 @@ mod tests {
         let p = plan::plan(&cfg, &m, 512, 1_000_000_000, "none", 0.6).unwrap();
         let rec = admit(p);
 
-        // Fake allocator: pre=0, post=100_000. delta=100_000 << 1_000_000_000 budget.
+        // allocator_peak = 100_000 (delta: 100_000 - 0), well below 1 GB budget; VmHWM from OS also expected < 1 GB.
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let cc = call_count.clone();
         let result = verify_run(
@@ -339,19 +422,23 @@ mod tests {
         let vr = result.unwrap();
         assert!(
             vr.budget_respected,
-            "budget_respected must be true when allocator_peak <= budget"
+            "budget_respected must be true when both peaks <= budget"
+        );
+        assert!(
+            vr.violated_bound.is_empty(),
+            "violated_bound must be empty when respected"
         );
     }
 
-    /// Fault detected: delta_bytes computed as vmhwm - allocator (should be vmhwm - alloc).
+    /// Fault detected: delta_bytes computed incorrectly.
     #[test]
-    fn delta_is_vmhwm_minus_allocator_after() {
+    fn delta_is_vmhwm_minus_allocator_peak() {
         let cfg = ModelConfig::reference();
         let m = ref_machine();
         let p = plan::plan(&cfg, &m, 512, 1_000_000_000, "none", 0.6).unwrap();
         let rec = admit(p);
 
-        // pre=0, post=50_000_000. Delta is used for budget_respected but VmHWM is from OS.
+        // peak_before=0, peak_after=50_000_000 → allocator_peak=50_000_000
         let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let cc = call_count.clone();
         let result = verify_run(Vec::new, 1_000_000_000, &rec, "delta-test", move || {
@@ -364,13 +451,41 @@ mod tests {
         })
         .unwrap();
 
-        // delta_bytes = vmhwm - peak_after (absolute process peak after run).
-        // peak_after = 50_000_000 in our fake.
-        // vmhwm is from the OS.
+        // delta_bytes = vmhwm - allocator_peak
         let expected_delta = result.vmhwm_bytes as i64 - 50_000_000_i64;
         assert_eq!(
             result.delta_bytes, expected_delta,
-            "delta_bytes must equal vmhwm - allocator_after"
+            "delta_bytes must equal vmhwm - allocator_peak"
+        );
+    }
+
+    /// F2: budget_respected must be false when VmHWM > budget, even if allocator_peak is tiny.
+    #[test]
+    fn budget_respected_false_when_vmhwm_exceeds_budget() {
+        let cfg = ModelConfig::reference();
+        let m = ref_machine();
+        let p = plan::plan(&cfg, &m, 512, 1_000_000_000, "none", 0.6).unwrap();
+        let rec = admit(p);
+
+        // VmHWM from the OS is the real process HWM which will be tens of MB.
+        // Set budget below what VmHWM will be.
+        let tiny_budget = 1024; // 1 KB — VmHWM will certainly exceed this
+        let result = verify_run(Vec::new, tiny_budget, &rec, "vmhwm-test", || 0).unwrap();
+
+        // VmHWM > 1 KB → os_budget_respected=false → budget_respected=false
+        assert!(
+            !result.os_budget_respected,
+            "os_budget_respected must be false when VmHWM > budget (VmHWM={})",
+            result.vmhwm_bytes
+        );
+        assert!(
+            !result.budget_respected,
+            "budget_respected must be false when VmHWM > budget"
+        );
+        assert!(
+            result.violated_bound.contains("VmHWM"),
+            "violated_bound must name VmHWM, got: {:?}",
+            result.violated_bound
         );
     }
 }

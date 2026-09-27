@@ -152,6 +152,21 @@ impl TrackingAllocator {
         }
     }
 
+    /// Reset the peak high-water mark to the current live bytes.
+    ///
+    /// After this call, `peak_bytes()` reflects only allocations made from this
+    /// point forward (net new high-water mark for the current run).  This allows
+    /// the stress harness to get a meaningful per-run peak measurement in a
+    /// warm process, where the global peak is already elevated from prior runs.
+    ///
+    /// # Safety
+    /// Only call this between runs (no concurrent allocations).  The caller must
+    /// ensure the process is quiescent (single-threaded measurement point).
+    pub fn reset_peak_to_current(&self) {
+        let current = self.current.load(Ordering::SeqCst).max(0) as u64;
+        self.peak.store(current, Ordering::SeqCst);
+    }
+
     /// Reset counters (for test isolation).  Ceiling is also cleared.
     ///
     /// # Safety

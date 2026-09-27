@@ -9,7 +9,7 @@ use fitsproof::admit::{admit, AdmitStatus};
 use fitsproof::model::ModelConfig;
 use fitsproof::plan::plan;
 use fitsproof::probe::{probe, MachineProfile};
-use fitsproof::verify::{read_vmhwm_bytes, verify_run};
+use fitsproof::verify::verify_run;
 
 const USAGE: &str = "\
 fitsproof — prove your local LLM fits in memory, or get a loud refusal
@@ -185,22 +185,49 @@ fn cmd_verify(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    // Run reference model and measure.
-    let weights = fitsproof::engine::transformer::Weights::reference(&cfg);
-    let mut transformer = fitsproof::engine::transformer::Transformer::new(cfg, weights);
+    // F4: determine effective quant/context from applied_degradation.
+    let (eff_quant, eff_context) = effective_config(&rec, &quant, context_len);
+
+    // F1: install the ceiling before generating.
+    // Ceiling = budget_bytes (the declared contract).
+    fitsproof::ALLOCATOR.set_ceiling(budget_bytes);
+    // F3: reset peak to current so peak_bytes() reflects only this run.
+    fitsproof::ALLOCATOR.reset_peak_to_current();
+
+    // F3: construct weights INSIDE the verify closure so those allocations
+    // are captured by the absolute peak measurement.
+    // F4: use eff_context for KV cache sizing.
+    let cfg_for_run = build_effective_cfg(&cfg, eff_context);
+    let eff_quant_owned = eff_quant.to_string();
 
     let vr = verify_run(
         move || {
-            transformer
-                .generate(&[1u32, 2, 3], 5, 0.0, 42)
-                .into_iter()
-                .collect()
+            // Build weights inside the measured region (F3 fix).
+            let weights = fitsproof::engine::transformer::Weights::reference_with_quant(
+                &cfg_for_run,
+                &eff_quant_owned,
+            );
+            let mut transformer =
+                fitsproof::engine::transformer::Transformer::new(cfg_for_run, weights);
+            // F4: quantised bundles use warmup_only (no fp32 inference in v0.1).
+            if transformer.weights.can_generate() {
+                transformer
+                    .generate(&[1u32, 2, 3], 5, 0.0, 42)
+                    .into_iter()
+                    .collect()
+            } else {
+                transformer.warmup_only();
+                Vec::new()
+            }
         },
         budget_bytes,
         &rec,
         "verify-run",
         || fitsproof::ALLOCATOR.peak_bytes(),
     );
+
+    // F1/F7: clear ceiling after the run (ceiling was active during the closure).
+    fitsproof::ALLOCATOR.set_ceiling(0);
 
     match vr {
         Ok(record) => {
@@ -216,7 +243,7 @@ fn cmd_verify(args: &[String]) -> ExitCode {
             println!("budget:         {:.3} GB", record.budget_bytes as f64 / 1e9);
             println!("budget_respected: {}", record.budget_respected);
             if !record.budget_respected {
-                eprintln!("BUDGET VIOLATED");
+                eprintln!("BUDGET VIOLATED: {}", record.violated_bound);
                 ExitCode::from(2)
             } else {
                 ExitCode::SUCCESS
@@ -303,27 +330,50 @@ fn cmd_stress() -> ExitCode {
             continue;
         }
 
+        // F4: use effective quant/context from degradation.
+        let (eff_quant, eff_context) = effective_config(&rec, quant, *context_len);
         let eff_budget = match &rec.applied_degradation {
             Some(step) => step.predicted_peak_bytes * 4,
             None => *budget,
         };
 
-        let weights = fitsproof::engine::transformer::Weights::reference(&ref_cfg);
-        let mut transformer =
-            fitsproof::engine::transformer::Transformer::new(ref_cfg.clone(), weights);
+        // F1: install ceiling before the run.
+        fitsproof::ALLOCATOR.set_ceiling(eff_budget);
+        // F3: reset peak to current so peak_bytes() reflects only this run.
+        fitsproof::ALLOCATOR.reset_peak_to_current();
+
         let label_owned = label.to_string();
+        let eff_quant_owned = eff_quant.to_string();
+        let cfg_for_run = build_effective_cfg(&ref_cfg, eff_context);
 
         let vr = verify_run(
             move || {
-                transformer
-                    .generate(&[1u32, 2, 3], 2, 0.0, 42)
-                    .into_iter()
-                    .collect()
+                // F3: construct weights INSIDE the closure for absolute peak measurement.
+                let weights = fitsproof::engine::transformer::Weights::reference_with_quant(
+                    &cfg_for_run,
+                    &eff_quant_owned,
+                );
+                let mut transformer =
+                    fitsproof::engine::transformer::Transformer::new(cfg_for_run, weights);
+                // F4: quantised bundles use warmup_only (no fp32 inference in v0.1).
+                if transformer.weights.can_generate() {
+                    transformer
+                        .generate(&[1u32, 2, 3], 2, 0.0, 42)
+                        .into_iter()
+                        .collect()
+                } else {
+                    transformer.warmup_only();
+                    Vec::new()
+                }
             },
             eff_budget,
             &rec,
             &label_owned,
-            || fitsproof::ALLOCATOR.peak_bytes(),
+            || {
+                // Clear ceiling before sampling peak (F1/F7 fix).
+                fitsproof::ALLOCATOR.set_ceiling(0);
+                fitsproof::ALLOCATOR.peak_bytes()
+            },
         );
 
         match vr {
@@ -383,7 +433,6 @@ fn parse_flag(args: &[String], flag: &str) -> Option<String> {
 }
 
 /// For CLI use: use a fast synthetic profile to avoid waiting for live probe.
-/// Pass --probe flag to do a real measurement.
 fn synthetic_machine_or_probe() -> MachineProfile {
     MachineProfile {
         hostname: "cli".into(),
@@ -392,7 +441,70 @@ fn synthetic_machine_or_probe() -> MachineProfile {
         memory_bandwidth_bps: 20_000_000_000.0,
         gemm_throughput_flops: 100_000_000_000.0,
         memory_bytes: 32 * 1024 * 1024 * 1024,
-        gpu_memory_bytes: read_vmhwm_bytes(), // reuse proc read as a sanity check
+        gpu_memory_bytes: 0, // F12 fix: no VRAM on this machine; was wrongly storing VmHWM here
         cpu_count: 8,
     }
+}
+
+/// F4: extract effective (quant, context_len) from an AdmitRecord's applied_degradation.
+///
+/// If a degradation was applied, use its parameters; otherwise fall back to the
+/// original request.
+fn effective_config<'a>(
+    rec: &fitsproof::admit::AdmitRecord,
+    original_quant: &'a str,
+    original_context: usize,
+) -> (&'a str, usize) {
+    // Note: the returned quant lifetime is tied to original_quant since we only
+    // reference static strings from the plan module.
+    if let Some(step) = &rec.applied_degradation {
+        let eff_quant = match step.kind {
+            fitsproof::plan::DegradationKind::LowerQuant => {
+                // The description contains "Use <quant> instead of ..."; extract quant.
+                // Rather than parsing, look up against the known quant levels.
+                let desc = &step.description;
+                if desc.contains("int4_sym") {
+                    "int4_sym"
+                } else if desc.contains("int8_sym") {
+                    "int8_sym"
+                } else if desc.contains("float16") {
+                    "float16"
+                } else {
+                    original_quant
+                }
+            }
+            fitsproof::plan::DegradationKind::ShorterContext => original_quant,
+        };
+
+        let eff_context = match step.kind {
+            fitsproof::plan::DegradationKind::ShorterContext => {
+                // Description: "Reduce context to <N> tokens (1/D of C)"
+                // Parse the target context length from the description.
+                extract_context_from_description(&step.description).unwrap_or(original_context)
+            }
+            fitsproof::plan::DegradationKind::LowerQuant => original_context,
+        };
+
+        (eff_quant, eff_context)
+    } else {
+        (original_quant, original_context)
+    }
+}
+
+/// Parse "Reduce context to <N> tokens ..." from a degradation description.
+fn extract_context_from_description(desc: &str) -> Option<usize> {
+    // "Reduce context to 256 tokens (1/2 of 512)"
+    let after = desc.strip_prefix("Reduce context to ")?;
+    let end = after.find(' ')?;
+    after[..end].parse().ok()
+}
+
+/// Build a ModelConfig with a potentially different max_seq_len for F4.
+///
+/// When the degradation reduces context, the KV cache in the engine must also
+/// use the shorter context length.
+fn build_effective_cfg(base: &ModelConfig, context_len: usize) -> ModelConfig {
+    let mut cfg = base.clone();
+    cfg.max_seq_len = context_len;
+    cfg
 }
