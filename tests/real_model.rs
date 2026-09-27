@@ -16,11 +16,28 @@ use fitsproof::plan::plan;
 use fitsproof::probe::MachineProfile;
 
 /// Real GGUF blobs to try, in preference order.
-const GGUF_PATHS: &[&str] = &[
-    "/home/openclaw/.cache/qmd/models/hf_tobil_qmd-query-expansion-1.7B-q4_k_m.gguf",
-    "/home/.cache/qmd/models/hf_tobil_qmd-query-expansion-1.7B-q4_k_m.gguf",
-    "/root/.cache/qmd/models/hf_tobil_qmd-query-expansion-1.7B-q4_k_m.gguf",
-];
+///
+/// Never hardcode a host path: the CI guard rejects those, and a stranger's machine has different
+/// directories. `FITSPROOF_REAL_GGUF` wins when set; otherwise the usual model caches under
+/// `$HOME` are searched, and the test skips (recording the limitation as PARTIAL) when none exist.
+fn gguf_candidates() -> Vec<std::path::PathBuf> {
+    let mut v: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(p) = std::env::var("FITSPROOF_REAL_GGUF") {
+        if !p.is_empty() {
+            v.push(p.into());
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::PathBuf::from(home);
+        for rel in [
+            ".cache/qmd/models/hf_tobil_qmd-query-expansion-1.7B-q4_k_m.gguf",
+            ".ollama/models/blobs/sha256-aeda25e",
+        ] {
+            v.push(home.join(rel));
+        }
+    }
+    v
+}
 
 fn synthetic_machine() -> MachineProfile {
     // Use a real probe for evidence; fall back to synthetic for CI speed.
@@ -46,23 +63,23 @@ fn synthetic_machine() -> MachineProfile {
 #[test]
 fn real_gguf_model_plan_succeeds() {
     // Find the first available GGUF file.
-    let gguf_path = GGUF_PATHS
-        .iter()
-        .find(|&&p| std::path::Path::new(p).exists());
+    let candidates = gguf_candidates();
+    let gguf_path = candidates.iter().find(|p| p.exists());
 
     let gguf_path = match gguf_path {
         Some(p) => p,
         None => {
             println!(
                 "SKIP: no real GGUF found at {:?}. \
+                 Set FITSPROOF_REAL_GGUF to run this proof. \
                  Limitation recorded as PARTIAL in docs/EVIDENCE.md.",
-                GGUF_PATHS
+                candidates
             );
             return; // not a failure — limitation is honest
         }
     };
 
-    println!("Reading GGUF: {gguf_path}");
+    println!("Reading GGUF: {}", gguf_path.display());
 
     let f = std::fs::File::open(gguf_path).expect("GGUF file must be readable");
     let meta = read_metadata(f).expect("GGUF header must parse");

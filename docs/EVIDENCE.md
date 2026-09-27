@@ -105,7 +105,7 @@ cargo test --test real_model -- --nocapture
 **Raw output:**
 ```
 Running tests/real_model.rs
-Reading GGUF: /home/openclaw/.cache/qmd/models/hf_tobil_qmd-query-expansion-1.7B-q4_k_m.gguf
+Reading GGUF: /build/.cache/qmd/models/hf_tobil_qmd-query-expansion-1.7B-q4_k_m.gguf
   GGUF version: 3
   Tensor count: 311
   KV entries: 25
