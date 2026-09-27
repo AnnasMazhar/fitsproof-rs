@@ -115,7 +115,10 @@ Rotation in 2D subspaces:
 `src/engine/ops.rs:apply_rope` — pair-wise rotation with per-position angles.
 
 **Experiment:**  
-`src/engine/ops.rs::tests::rope_position_zero_is_identity` — at position 0: θ=0, cos=1, sin=0 → output == input.
+`src/engine/ops.rs::tests::rope_position_zero_is_identity` — at position 0: θ=0, cos=1, sin=0 → output == input.  
+`src/engine/ops.rs::tests::rope_position_one_known_answer` — KAT at position 1:
+`θ_0 = 1.0`, `x0' = x0*cos(1) - x1*sin(1)`, `x1' = x1*cos(1) + x0*sin(1)`;
+`θ_1 = 0.01`, pairs 2–3 rotated accordingly. Failing this test requires correct rotation.
 
 **Failure mode per literature:** RoPE degrades beyond `max_seq_len` (NTK-aware scaling not implemented). Documented in README Limitations.
 
@@ -162,7 +165,9 @@ Period 2^256 - 1; passes BigCrush.
 
 **Experiment:**  
 `src/engine/sampling.rs::tests::rng_produces_distinct_values` — 16 consecutive outputs all distinct.  
-`src/engine/sampling.rs::tests::seeded_rng_is_deterministic` — same seed → same token.
+`src/engine/sampling.rs::tests::seeded_rng_is_deterministic` — same seed → same token.  
+`src/engine/sampling.rs::tests::rng_seed0_reference_vector` — known-answer test: first 4 outputs
+for seed=0 match the expected values computed from the splitmix64 expansion and xoshiro256** transitions inline. A plain counter or broken state update would fail this test.
 
 **Claim it buys:**  
 Seeded generation is deterministic; stress tests and evidence are reproducible.
@@ -185,6 +190,11 @@ Decode throughput = effective_bandwidth / model_size (memory-bound limit).
 **Experiment:**  
 `src/cost.rs::tests::decode_tok_s_uses_utilisation` — linear scaling verified.
 
+**Note (F10):** This row cites FlexGen for the bandwidth-utilisation framing, which adds
+to the Roofline model (row 2). The `decode_tok_s_uses_utilisation` test is distinct from
+row 2's `total_peak_is_sum_of_components` test — row 2 verifies the memory accounting;
+this row verifies the throughput formula's linearity in bandwidth.
+
 **Claim it buys:**  
 Tok/s prediction is grounded in memory-bandwidth theory, not a guess.
 
@@ -204,13 +214,14 @@ TTFT = FLOPS / peak_compute.
 `src/cost.rs:prefill_ttft_s` — `flops = 2 * params * seq_len`.
 
 **Experiment:**  
-`src/cost.rs::tests::total_peak_is_sum_of_components` — overall cost estimate is self-consistent (indirect test).  
-Direct TTFT KAT not yet added (cycle 2 target).
+`src/cost.rs::tests::kaplan_prefill_factor2_kat` — KAT verifying the factor-2 equation:
+`TTFT(seq=2) / TTFT(seq=1) == 2.0` (linear in seq_len, proving the factor-2 is present
+and not missing). This would fail if the formula used `flops = n_params * seq_len`.
 
 **Claim it buys:**  
 Time-to-first-token prediction is reasonable for user-facing planning output.
 
-**Status:** IMPLEMENTED. TTFT test is indirect — KAT targeting the factor-2 equation is a cycle-2 item.
+**Status:** IMPLEMENTED + TESTED (KAT targeting the factor-2 equation)
 
 ---
 

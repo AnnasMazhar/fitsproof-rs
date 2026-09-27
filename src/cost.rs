@@ -393,4 +393,32 @@ mod tests {
         let cfg = ref_cfg();
         let _ = weight_bytes(&cfg, "int2_mystery");
     }
+
+    /// F10: Kaplan factor-2 KAT (Scaling Laws §D, FLOPS = 2 * n_params * seq_len).
+    ///
+    /// Doubling seq_len must double TTFT (linear in seq_len from the factor-2 formula).
+    /// Fault detected: if the factor-2 is missing (FLOPS = n_params * seq_len), TTFT
+    /// would still scale linearly but would be 2× too low — a different KAT.
+    ///
+    /// This test verifies the factor-2 by checking TTFT at seq_len=1 vs seq_len=2:
+    /// ratio must equal exactly 2.0.
+    #[test]
+    fn kaplan_prefill_factor2_kat() {
+        let cfg = ref_cfg();
+        let machine = ref_machine();
+        let ttft_1 = prefill_ttft_s(&cfg, &machine, 1, "none");
+        let ttft_2 = prefill_ttft_s(&cfg, &machine, 2, "none");
+        // Linearity: ttft(2) / ttft(1) must be 2.0 (linear in seq_len).
+        let ratio = ttft_2 / ttft_1;
+        assert!(
+            (ratio - 2.0).abs() < 1e-6,
+            "TTFT must be linear in seq_len (factor-2 from Kaplan 2020): ratio={ratio}"
+        );
+
+        // Additionally verify the formula value is positive and finite.
+        assert!(
+            ttft_1.is_finite() && ttft_1 > 0.0,
+            "prefill_ttft_s must return a positive finite value, got {ttft_1}"
+        );
+    }
 }

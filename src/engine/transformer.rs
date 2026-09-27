@@ -146,8 +146,8 @@ impl Weights {
                     );
 
                 let quant_bytes = match quant {
-                    "float16" => total_params * 2,        // 2 bytes per param
-                    "int8_sym" => total_params,           // 1 byte per param
+                    "float16" => total_params * 2,          // 2 bytes per param
+                    "int8_sym" => total_params,             // 1 byte per param
                     "int4_sym" => total_params.div_ceil(2), // 0.5 bytes per param (packed)
                     _ => unreachable!(),
                 };
