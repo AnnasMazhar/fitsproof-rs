@@ -186,6 +186,31 @@ impl Weights {
     pub fn can_generate(&self) -> bool {
         !self.embed.is_empty()
     }
+
+    /// Returns the total heap bytes used by this weight bundle.
+    ///
+    /// For fp32 bundles this counts all `Vec<f32>` fields (4 bytes per element).
+    /// For quantised bundles (`quant_weight_bytes` non-empty) the quant blob
+    /// dominates; the fp32 matrices are empty in that case.
+    ///
+    /// This is a pure function of the bundle's own `Vec` lengths — it reads no
+    /// global state and is therefore safe to call from parallel tests.
+    pub fn weight_bytes(&self) -> usize {
+        let fp32_bytes = (self.embed.len()
+            + self.final_norm.len()
+            + self.unembed.len()
+            + self.attn_norm.iter().map(|v| v.len()).sum::<usize>()
+            + self.ffn_norm.iter().map(|v| v.len()).sum::<usize>()
+            + self.wq.iter().map(|v| v.len()).sum::<usize>()
+            + self.wk.iter().map(|v| v.len()).sum::<usize>()
+            + self.wv.iter().map(|v| v.len()).sum::<usize>()
+            + self.wo.iter().map(|v| v.len()).sum::<usize>()
+            + self.gate.iter().map(|v| v.len()).sum::<usize>()
+            + self.up.iter().map(|v| v.len()).sum::<usize>()
+            + self.down.iter().map(|v| v.len()).sum::<usize>())
+            * std::mem::size_of::<f32>();
+        fp32_bytes + self.quant_weight_bytes.len()
+    }
 }
 
 /// Simple LCG for deterministic weight generation (no external dep).
@@ -452,21 +477,26 @@ mod tests {
     }
 
     /// F4: quantised weight bundle allocates less memory than fp32.
+    ///
+    /// Compares bundle byte sizes directly via `Weights::weight_bytes()` rather than
+    /// reading process-global allocator-peak deltas.  Peak deltas are racy under
+    /// `cargo test`'s parallel-thread model: another thread's allocation can raise
+    /// the global peak between the two `before`/`after` reads, making `fp32_peak = 0`
+    /// and causing a spurious failure (CI run 36341919967).  `weight_bytes()` is a
+    /// pure calculation on the bundle's own `Vec` lengths — no global state, no race.
     #[test]
     fn int8_weight_bundle_smaller_than_fp32() {
         let cfg = ModelConfig::reference();
-        let before = crate::ALLOCATOR.peak_bytes();
-        let _fp32_weights = Weights::reference(&cfg);
-        let fp32_peak = crate::ALLOCATOR.peak_bytes() - before;
+        let fp32_weights = Weights::reference(&cfg);
+        let int8_weights = Weights::reference_with_quant(&cfg, "int8_sym");
 
-        let before2 = crate::ALLOCATOR.peak_bytes();
-        let _int8_weights = Weights::reference_with_quant(&cfg, "int8_sym");
-        let int8_delta = crate::ALLOCATOR.peak_bytes() - before2;
+        let fp32_bytes = fp32_weights.weight_bytes();
+        let int8_bytes = int8_weights.weight_bytes();
 
-        // int8 should use less or equal memory than fp32 (4x compression expected).
+        // int8 uses 1 byte/param vs fp32's 4 bytes/param — must be strictly smaller.
         assert!(
-            int8_delta <= fp32_peak,
-            "int8 weight bundle ({int8_delta} B new peak) must not exceed fp32 ({fp32_peak} B new peak)"
+            int8_bytes < fp32_bytes,
+            "int8 weight bundle ({int8_bytes} B) must be smaller than fp32 ({fp32_bytes} B)"
         );
     }
 
