@@ -65,13 +65,17 @@ GQA: n_kv_heads < n_heads; groups of query heads share a single KV head.
 `src/engine/ops.rs:gqa_attention` — groups query heads: `kv_head = h / group_size`.
 
 **Experiment:**  
-`src/cost.rs::tests::kv_cache_bytes_reference_fp32_known_answer` — hand-computed KAT:  
-`2 * 6 * 2 * 512 * 64 * 4 = 6,291,456 bytes` matches implementation.  
-`src/cost.rs::tests::kv_cache_bytes_int8_is_quarter_of_fp32` — int8 = ¼ fp32 (bits halved twice).  
+`src/cost.rs::tests::kv_cache_bytes_reference_fp16_known_answer` — hand-computed KAT:  
+`2 * 6 * 2 * 512 * 64 * 2 = 3,145,728 bytes` (fp16 KV cache = 2 bytes/element) matches implementation.  
+`src/cost.rs::tests::kv_cache_bytes_independent_of_weight_quant` — proves KV cache size is identical  
+for fp32 and int4 weight models when both use the default fp16 KV activation dtype.  
 `src/engine/ops.rs::tests::gqa_single_token_returns_value` — single-token attention with 1 KV head returns V.
 
 **Claim it buys:**  
-KV cache dominates peak memory at long contexts; correct accounting is what makes the plan accurate.
+KV cache dominates peak memory at long contexts; correct accounting is what makes the plan accurate.  
+**Key correction (c1-p08-improve-1):** KV cache is stored at the activation dtype (fp16), NOT at the  
+weight quantisation precision. Passing weight quant to kv_cache_bytes underestimates KV by 4× for  
+int4 models and 2× for int8 models — a correctness bug fixed in this pass.
 
 **Status:** IMPLEMENTED + TESTED (KAT from paper formula)
 

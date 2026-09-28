@@ -252,7 +252,7 @@ fn cmd_stress() -> ExitCode {
     let ref_cfg = ModelConfig::reference();
 
     let fp32_peak = fitsproof::cost::weight_bytes(&ref_cfg, "none")
-        + fitsproof::cost::kv_cache_bytes(&ref_cfg, 512, "none")
+        + fitsproof::cost::kv_cache_bytes(&ref_cfg, 512, "fp16")
         + fitsproof::cost::activation_bytes(&ref_cfg);
 
     // 25 configurations.

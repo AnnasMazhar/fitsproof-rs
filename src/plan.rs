@@ -274,7 +274,7 @@ mod tests {
         let m = ref_machine();
         // Budget just below the fp32 peak but enough for int4.
         let fp32_peak = cost::weight_bytes(&cfg, "none")
-            + cost::kv_cache_bytes(&cfg, 512, "none")
+            + cost::kv_cache_bytes(&cfg, 512, "fp16")
             + cost::activation_bytes(&cfg);
         let just_below = fp32_peak - 1;
         let p = plan(&cfg, &m, 512, just_below, "none", 0.6).unwrap();

@@ -140,7 +140,7 @@ fn refused_below_any_degradation_fits() {
 
     // Compute the minimum budget any degradation could need.
     let int4_peak = cost::weight_bytes(&cfg, "int4_sym")
-        + cost::kv_cache_bytes(&cfg, 512, "int4_sym")
+        + cost::kv_cache_bytes(&cfg, 512, "fp16")
         + cost::activation_bytes(&cfg);
 
     // Budget below int4 — nothing fits.
@@ -170,10 +170,10 @@ fn degraded_config_emits_degradation_record() {
     let machine = test_machine();
 
     let fp32_peak = cost::weight_bytes(&cfg, "none")
-        + cost::kv_cache_bytes(&cfg, 512, "none")
+        + cost::kv_cache_bytes(&cfg, 512, "fp16")
         + cost::activation_bytes(&cfg);
     let int4_peak = cost::weight_bytes(&cfg, "int4_sym")
-        + cost::kv_cache_bytes(&cfg, 512, "int4_sym")
+        + cost::kv_cache_bytes(&cfg, 512, "fp16")
         + cost::activation_bytes(&cfg);
 
     assert!(
@@ -226,10 +226,10 @@ fn degradation_record_describes_mode_change() {
     let machine = test_machine();
 
     let fp32_peak = cost::weight_bytes(&cfg, "none")
-        + cost::kv_cache_bytes(&cfg, 512, "none")
+        + cost::kv_cache_bytes(&cfg, 512, "fp16")
         + cost::activation_bytes(&cfg);
     let int4_peak = cost::weight_bytes(&cfg, "int4_sym")
-        + cost::kv_cache_bytes(&cfg, 512, "int4_sym")
+        + cost::kv_cache_bytes(&cfg, 512, "fp16")
         + cost::activation_bytes(&cfg);
 
     if int4_peak < fp32_peak {

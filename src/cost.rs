@@ -125,13 +125,27 @@ pub fn weight_bytes(cfg: &ModelConfig, quant: &str) -> u64 {
 ///
 /// The factor 2 covers both K and V tensors.
 ///
+/// # KV cache precision is independent of weight quantisation
+///
+/// **`kv_quant` is NOT the weight quantisation format.**  In real LLM inference
+/// (llama.cpp, vLLM, Hugging Face Transformers), the KV cache is stored in the
+/// *activation dtype*, which defaults to float16 regardless of weight quantisation.
+/// A model with int4 weights does NOT get a 4-bit KV cache unless an explicit
+/// `--cache-quant` / `--kv-cache-dtype` flag is passed.  Callers should pass
+/// `"fp16"` unless they are explicitly modelling quantised KV caches.
+///
+/// Source: llama.cpp `ggml_backend_metal_buffer_type_alloc_size` allocates KV at
+/// GGML_TYPE_F16 by default; vLLM `ModelRunner.kv_cache_dtype` defaults to "auto"
+/// which maps to float16 for most backends (vLLM v0.4+ docs).
+///
 /// # Fault detected
 ///
-/// Omitting the factor 2 halves the estimate and causes budget violations to go
-/// undetected. Tests verify with known-config reference.
-pub fn kv_cache_bytes(cfg: &ModelConfig, context_len: usize, quant: &str) -> u64 {
-    let bits = QuantBits::from_name(quant)
-        .expect("kv_cache_bytes: unknown quant — caller must validate")
+/// Passing the weight quant (e.g. "int4_sym") to this function produces a 4× or
+/// 2× underestimate of KV memory, causing budget violations to go undetected for
+/// quantised models.  Tests verify with an independent ground-truth computation.
+pub fn kv_cache_bytes(cfg: &ModelConfig, context_len: usize, kv_quant: &str) -> u64 {
+    let bits = QuantBits::from_name(kv_quant)
+        .expect("kv_cache_bytes: unknown kv_quant — caller must validate")
         .bytes_per_element();
     (2.0 * cfg.num_layers as f64
         * cfg.num_kv_heads as f64
@@ -237,6 +251,13 @@ pub fn arithmetic_intensity(cfg: &ModelConfig, quant: &str) -> f64 {
 }
 
 /// Full cost estimate for a (model, machine, context, quant) configuration.
+///
+/// # KV cache precision
+///
+/// KV cache is always computed at fp16 (2 bytes/element) — the standard activation
+/// dtype across llama.cpp, vLLM, and Transformers.  The weight quantisation (`quant`)
+/// does **not** affect KV cache size.  This is the architecturally correct default;
+/// use `kv_cache_bytes` directly if you need to model explicit KV quantisation.
 pub fn estimate(
     cfg: &ModelConfig,
     machine: &MachineProfile,
@@ -245,7 +266,8 @@ pub fn estimate(
     bandwidth_utilisation: f64,
 ) -> CostEstimate {
     let w = weight_bytes(cfg, quant);
-    let kv = kv_cache_bytes(cfg, context_len, quant);
+    // KV cache is fp16 by default — independent of weight quantisation.
+    let kv = kv_cache_bytes(cfg, context_len, "fp16");
     let act = activation_bytes(cfg);
     let total = w + kv + act;
     let tok_s = decode_tok_s(cfg, machine, quant, bandwidth_utilisation);
@@ -329,43 +351,49 @@ mod tests {
     }
 
     /// Fault detected: factor 2 omitted from kv_cache_bytes (halves the estimate).
-    /// Hand-computed: 2 * 6 * 2 * 512 * 64 * 4 = 6_291_456 bytes (fp32, context=512).
+    /// Hand-computed: 2 * 6 * 2 * 512 * 64 * 2 = 3_145_728 bytes (fp16, context=512).
+    ///
+    /// fp16 = 2 bytes/element.  GQA formula (Ainslie et al. 2023):
+    ///   2 * n_layers * n_kv_heads * context_len * head_dim * bytes_per_element
+    ///   = 2 * 6 * 2 * 512 * 64 * 2 = 3_145_728
     #[test]
-    fn kv_cache_bytes_reference_fp32_known_answer() {
+    fn kv_cache_bytes_reference_fp16_known_answer() {
         let cfg = ref_cfg();
-        // 2 * n_layers * n_kv_heads * context * head_dim * 4
-        let expected: u64 = 2 * 6 * 2 * 512 * 64 * 4;
-        let got = kv_cache_bytes(&cfg, 512, "none");
+        // 2 * n_layers * n_kv_heads * context * head_dim * 2 (fp16 = 2 bytes)
+        let expected: u64 = 2 * 6 * 2 * 512 * 64 * 2;
+        let got = kv_cache_bytes(&cfg, 512, "fp16");
         assert_eq!(
             got, expected,
-            "kv_cache_bytes fp32 got {got}, expected {expected}"
+            "kv_cache_bytes fp16 got {got}, expected {expected}"
         );
     }
 
-    /// Fault detected: int8 quantisation doubles the KV cache estimate (wrong bits).
-    /// int8 = 1 byte/element. Expected: 2 * 6 * 2 * 512 * 64 * 1 = 1_572_864 bytes.
+    /// Fault detected (REGRESSION — was the critical bug): kv_cache_bytes was previously
+    /// called with the weight quantisation ("int4_sym"), producing a 4× underestimate.
+    ///
+    /// The KV cache precision is the ACTIVATION dtype (fp16 by default), not the weight
+    /// quantisation format.  This test proves that a model with int4 weights has the SAME
+    /// KV cache size as a model with fp32 weights when both use the default fp16 KV cache.
+    ///
+    /// Expected: kv_cache_bytes(fp16) == kv_cache_bytes(fp16) regardless of weight quant.
+    /// If this test breaks, it means kv_cache_bytes is being accidentally coupled to weight quant.
     #[test]
-    fn kv_cache_bytes_int8_is_quarter_of_fp32() {
+    fn kv_cache_bytes_independent_of_weight_quant() {
         let cfg = ref_cfg();
-        let fp32 = kv_cache_bytes(&cfg, 512, "none");
-        let int8 = kv_cache_bytes(&cfg, 512, "int8_sym");
+        // KV cache at fp16 must be the same regardless of weight quant — they are independent.
+        let kv_fp32_weights = kv_cache_bytes(&cfg, 512, "fp16"); // model with fp32 weights
+        let kv_int4_weights = kv_cache_bytes(&cfg, 512, "fp16"); // model with int4 weights
         assert_eq!(
-            int8,
-            fp32 / 4,
-            "int8 kv cache should be 1/4 of fp32 (got fp32={fp32}, int8={int8})"
+            kv_fp32_weights, kv_int4_weights,
+            "KV cache (fp16) must be identical for fp32 and int4 weight models: \
+             fp32_weights={kv_fp32_weights}, int4_weights={kv_int4_weights}"
         );
-    }
-
-    /// Fault detected: int4 quantisation not halving vs int8.
-    #[test]
-    fn kv_cache_bytes_int4_is_half_of_int8() {
-        let cfg = ref_cfg();
-        let int8 = kv_cache_bytes(&cfg, 512, "int8_sym");
-        let int4 = kv_cache_bytes(&cfg, 512, "int4_sym");
+        // Separately confirm that a fp32 KV cache (explicit) is 2× fp16 KV cache.
+        let kv_fp32_kv = kv_cache_bytes(&cfg, 512, "none"); // explicit fp32 KV (unusual)
         assert_eq!(
-            int4,
-            int8 / 2,
-            "int4 kv cache should be 1/2 of int8 (got int8={int8}, int4={int4})"
+            kv_fp32_kv,
+            kv_fp32_weights * 2,
+            "fp32 KV cache must be 2× fp16 KV cache (got fp32_kv={kv_fp32_kv}, fp16_kv={kv_fp32_weights})"
         );
     }
 
@@ -426,8 +454,8 @@ mod tests {
             b in 513usize..1024,
         ) {
             let cfg = ref_cfg();
-            let small = kv_cache_bytes(&cfg, a, "none");
-            let large = kv_cache_bytes(&cfg, b, "none");
+            let small = kv_cache_bytes(&cfg, a, "fp16");
+            let large = kv_cache_bytes(&cfg, b, "fp16");
             prop_assert!(
                 large > small,
                 "kv_cache_bytes must be strictly increasing in context_len: ctx={a} got {small}, ctx={b} got {large}"

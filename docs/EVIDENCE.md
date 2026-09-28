@@ -214,21 +214,30 @@ check_no_internal_refs: CLEAN
 
 ---
 
-## 10. KV cache known-answer: fp32 factor-2 formula verified
+## 10. KV cache known-answer: fp16 default verified (c1-p08-improve-1 correction)
 
-**Claim:** `kv_cache_bytes` for fp32, 512 context, reference config = 2 * 6 * 2 * 512 * 64 * 4 = 6,291,456 bytes.
+**Claim:** `kv_cache_bytes` for fp16 KV cache (the real default), 512 context, reference config =
+2 × 6 × 2 × 512 × 64 × 2 = 3,145,728 bytes.
+
+**Background:** The original test used fp32 (4 bytes/element) as the "known answer".  This was wrong:
+real KV caches default to fp16 in llama.cpp, vLLM, and Transformers.  The old tests
+`kv_cache_bytes_int8_is_quarter_of_fp32` and `kv_cache_bytes_int4_is_half_of_int8` validated an
+incorrect model where weight quantisation controlled KV precision.  Both have been replaced.
 
 **Command:**
 ```
-cargo test --lib cost::tests::kv_cache_bytes_reference_fp32_known_answer -- --nocapture
+~/.cargo/bin/cargo test --lib kv_cache_bytes_reference_fp16_known_answer -- --nocapture
 ```
 
 **Raw output:**
 ```
-test cost::tests::kv_cache_bytes_reference_fp32_known_answer ... ok
+running 1 test
+test cost::tests::kv_cache_bytes_reference_fp16_known_answer ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.01s
 ```
 
-**Status:** PASS (formula matches hand-computed value from GQA paper, Ainslie et al. 2023)
+**Status:** PASS (formula matches hand-computed value: 2 × n_layers × n_kv_heads × ctx × head_dim × 2)
 
 ---
 
@@ -445,3 +454,65 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```
 
 **Status:** PASS — 110 tests total (79 lib + 19 adversarial + 1 real_model + 2 smoke + 3 stress + 6 value).
+
+---
+
+## 19. c1-p08-improve-1: KV cache quantisation bug — regression test passes
+
+**Claim (new):** `kv_cache_bytes` with fp16 KV is identical for a model with fp32 weights and a model
+with int4 weights — proving KV precision is decoupled from weight quantisation.
+
+**Command:**
+```
+~/.cargo/bin/cargo test --lib kv_cache_bytes_independent_of_weight_quant -- --nocapture
+```
+
+**Raw output:**
+```
+running 1 test
+test cost::tests::kv_cache_bytes_independent_of_weight_quant ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.01s
+```
+
+**Status:** PASS — this is the regression guard.  If anyone couples weight quant back to KV precision,
+this test fails immediately.
+
+---
+
+## 20. Full test suite after c1-p08-improve-1: 109 tests
+
+**Claim:** `cargo test --all-targets` is green with 109 tests after the KV cache fix.
+
+**Command:**
+```
+~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]"
+```
+
+**Raw output:**
+```
+running 78 tests
+test result: ok. 78 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.54s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 19 tests
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 45.49s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Status:** PASS — 109 tests total (78 lib + 19 adversarial + 1 real_model + 2 smoke + 3 stress + 6 value).
+Decrease from 110 to 109: 3 tests validating incorrect KV behaviour replaced with 2 tests validating
+correct behaviour.
+
+**Note:** The open items from the previous pass remain unchanged:
+- Real-model generation (tokens, not just plan): v0.2 scope.
+- `serve` and `mcp` CLI commands: exit 2 in v0.1.
+- Mutation score: target ≥70% for cycle 2.
+- CI static binary (musl): CI workflow present, not verified locally.

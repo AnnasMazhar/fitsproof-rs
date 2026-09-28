@@ -61,9 +61,10 @@ fn make_configs() -> Vec<StressConfig> {
     let ref_cfg = ModelConfig::reference();
 
     // Helper: compute predicted peak for a given (quant, context_len).
+    // KV cache is always at fp16 (activation dtype) — independent of weight quant.
     let peak = |quant: &str, ctx: usize| -> u64 {
         cost::weight_bytes(&ref_cfg, quant)
-            + cost::kv_cache_bytes(&ref_cfg, ctx, quant)
+            + cost::kv_cache_bytes(&ref_cfg, ctx, "fp16")
             + cost::activation_bytes(&ref_cfg)
     };
 
@@ -440,10 +441,10 @@ fn degraded_config_has_emitted_degradation_record() {
     let machine = synthetic_machine();
 
     let fp32_peak = cost::weight_bytes(&cfg, "none")
-        + cost::kv_cache_bytes(&cfg, 512, "none")
+        + cost::kv_cache_bytes(&cfg, 512, "fp16")
         + cost::activation_bytes(&cfg);
     let int4_peak = cost::weight_bytes(&cfg, "int4_sym")
-        + cost::kv_cache_bytes(&cfg, 512, "int4_sym")
+        + cost::kv_cache_bytes(&cfg, 512, "fp16")
         + cost::activation_bytes(&cfg);
 
     // Only meaningful if int4 fits but fp32 doesn't.
