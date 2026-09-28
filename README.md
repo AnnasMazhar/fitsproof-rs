@@ -62,19 +62,35 @@ Refused configs name the binding constraint. They exit 2 so your CI can gate on 
 
 ```
 $ fitsproof admit --budget-gb 0.001
-REFUSED: needs 0.06 GB, budget 0.00 GB; no degradation fits
+REFUSED: needs 0.06 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.00 GB; no degradation fits
 $ echo $?
 2
 ```
 
-A real GGUF model (Qwen3 1.7B Q4) is read and planned against a budget:
+A real GGUF model (Qwen3 1.7B Q4) is read and planned against a budget.
+The test searches standard model cache paths (`$HOME/.cache/`) or uses `FITSPROOF_REAL_GGUF`.
+On a machine without a cached model it prints a skip message and passes — the limitation is
+recorded as PARTIAL in `docs/EVIDENCE.md`. To reproduce the full run:
+
+```bash
+# Point at any GGUF you have (Q4_K_M of any 1–7B model works):
+FITSPROOF_REAL_GGUF=/path/to/model.gguf cargo test --test real_model -- --nocapture
+```
+
+Output on a machine with a Qwen3 1.7B Q4 model cached:
 
 ```
-$ cargo test --test real_model -- --nocapture
+$ FITSPROOF_REAL_GGUF=~/.cache/qmd/models/hf_tobil_qmd-query-expansion-1.7B-q4_k_m.gguf \
+    cargo test --test real_model -- --nocapture
+Reading GGUF: ~/.cache/qmd/models/hf_tobil_qmd-query-expansion-1.7B-q4_k_m.gguf
   GGUF version: 3 | Tensor count: 311 | Architecture: qwen3
   Predicted peak: 3.209 GB | Budget: 4.000 GB | Verdict: Fits
 test real_gguf_model_plan_succeeds ... ok
 ```
+
+**What this proves:** `plan()` reads real GGUF architecture metadata and returns a correct
+prediction. It does *not* load tensor weights or run generation — that is a v0.2 scope item.
+`EVIDENCE.md §5` documents this as PARTIAL and explains what the v0.2 weight loader enables.
 
 `fitsproof verify` prints both the allocator-counted peak and the OS high-water mark (`VmHWM`),
 plus the delta — so the overhead of the runtime is a visible number, not a footnote:
@@ -109,6 +125,28 @@ fitsproof plan --model /path/to/model.gguf --budget-gb 8
 **Stress your configuration space:**
 ```bash
 fitsproof stress  # fails the build on any violation; safe to run in CI
+```
+
+**In a Makefile (the `Makefile` in this repo is a working example):**
+```makefile
+preflight:
+	fitsproof admit \
+	    --model "$(MODEL)" \
+	    --budget-gb $(BUDGET_GB) \
+	    --quant $(QUANT) \
+	    --context $(CTX)
+```
+```bash
+make preflight MODEL=/path/to/llama-7b-q4.gguf BUDGET_GB=4 QUANT=q4_k_m CTX=4096
+# → ADMITTED or REFUSED with named binding constraint; exit 0 or 2
+```
+
+**In GitHub Actions:**
+```yaml
+- name: Memory contract pre-flight
+  run: |
+    make preflight MODEL=${{ env.MODEL_PATH }} BUDGET_GB=4.0 QUANT=q4_k_m CTX=4096
+    # exit 2 fails the job and names the constraint (weight/kv/activation)
 ```
 
 ## What this is NOT

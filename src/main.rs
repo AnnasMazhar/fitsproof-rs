@@ -10,7 +10,7 @@ use fitsproof::gguf::{metadata_to_model_config, read_metadata};
 use fitsproof::model::ModelConfig;
 use fitsproof::plan::plan;
 use fitsproof::probe::{probe, MachineProfile};
-use fitsproof::verify::{read_vmhwm_bytes, verify_run};
+use fitsproof::verify::verify_run;
 
 const USAGE: &str = "\
 fitsproof — prove your local LLM fits in memory, or get a loud refusal
@@ -125,6 +125,7 @@ fn cmd_plan(args: &[String]) -> ExitCode {
         Err(e) => {
             eprintln!("fitsproof plan: {e}");
             eprintln!("  Try: fitsproof plan --budget-gb 4 --quant q4_k_m --context 4096");
+            eprintln!("  Valid quant values: none, float16, int8_sym, int4_sym, q4_k_m, q4_k_s, q8_0, q4_0");
             ExitCode::from(2)
         }
     }
@@ -509,7 +510,7 @@ fn synthetic_machine_or_probe() -> MachineProfile {
         memory_bandwidth_bps: 20_000_000_000.0,
         gemm_throughput_flops: 100_000_000_000.0,
         memory_bytes: 32 * 1024 * 1024 * 1024,
-        gpu_memory_bytes: read_vmhwm_bytes(), // reuse proc read as a sanity check
+        gpu_memory_bytes: 0,
         cpu_count: 8,
     }
 }

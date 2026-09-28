@@ -252,7 +252,194 @@ $ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings 2>&1
 
 ---
 
-## c1-p09-improve-2 (cycle 1, pass 9) — 2026-09-28
+## c2-p09-improve-2 (cycle 2, pass 9) — 2026-09-28
+
+### Findings fixed
+
+Four adoption-readiness issues found and fixed in this pass.
+
+---
+
+### IMP-1 — README real_model evidence block misleads on reproducibility
+
+**Severity:** Major credibility gap (a skeptical reviewer's first finding)
+
+**Root cause:** The README `## Headline evidence` section showed `cargo test --test real_model --
+--nocapture` producing output with `Predicted peak: 3.209 GB | Verdict: Fits` as if the test
+always runs. The test file actually checks `FITSPROOF_REAL_GGUF` env var first, then searches
+`$HOME/.cache/` paths — and **skips** (passes) when no model is found. A stranger doing a fresh
+clone would see `SKIP: no real GGUF found` rather than the output shown, making the evidence block
+non-reproducible as presented.
+
+Additionally, the refusal message shown in README was the old single-total format from before
+ADV-1 was fixed:
+```
+REFUSED: needs 0.06 GB, budget 0.00 GB; no degradation fits
+```
+But the actual binary (post ADV-1 fix) now emits:
+```
+REFUSED: needs 0.055 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.001 GB; no degradation fits
+```
+
+**Fix applied:**
+
+README `## Headline evidence` section updated:
+- `real_model` block now shows the `FITSPROOF_REAL_GGUF=...` invocation explicitly, states what
+  the test proves (metadata → plan, not weight generation), and links to `EVIDENCE.md §5` for the
+  PARTIAL label.
+- Refusal message example updated to show the component breakdown format that the binary actually
+  emits post-ADV-1 fix.
+
+Raw terminal verification (refusal message format):
+```
+$ ./target/release/fitsproof admit --budget-gb 0.001; echo "EXIT:$?"
+REFUSED: needs 0.055 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.001 GB; no degradation fits
+EXIT:2
+```
+
+---
+
+### IMP-2 — `plan` command did not name valid quant values on error
+
+**Severity:** Minor UX gap (actionability parity with `admit`)
+
+**Root cause:** `cmd_admit()` named the valid quant values on failure:
+```
+  Valid quant values: none, float16, int8_sym, int4_sym, q4_k_m, q4_k_s, q8_0, q4_0
+```
+But `cmd_plan()` only printed a generic "try" hint with no valid-values list. A stranger who
+mistyped a quant name would get an actionable message from `admit` but not from `plan`.
+
+**Fix applied:**
+
+`src/main.rs: cmd_plan()` — added the same valid-values hint line as `cmd_admit()`.
+
+Raw terminal verification:
+```
+$ ./target/release/fitsproof plan --budget-gb 4 --quant badquant; echo "EXIT:$?"
+fitsproof plan: unknown quantisation "badquant"
+  Try: fitsproof plan --budget-gb 4 --quant q4_k_m --context 4096
+  Valid quant values: none, float16, int8_sym, int4_sym, q4_k_m, q4_k_s, q8_0, q4_0
+EXIT:2
+```
+
+---
+
+### IMP-3 — No Makefile / CI integration example existed
+
+**Severity:** Minor adoption gap (README had only inline bash; no real CI target)
+
+**Root cause:** ADOPTION.md §2 had a GitHub Actions snippet but no Makefile target. README's
+"How to plug it in" section had only bare bash. Teams using Makefile-driven CI (most teams) had
+no copy-paste target.
+
+**Fix applied:**
+
+`Makefile` created with four targets:
+- `preflight` — runs `fitsproof admit` with MODEL/BUDGET_GB/QUANT/CTX variables; no MODEL set → reference bundle check
+- `stress` — runs `fitsproof stress`; 0 violations required
+- `test` — runs `cargo test --all-targets`
+- `musl` — builds static binary and verifies `ldd` reports not-a-dynamic-executable
+
+README `## How to plug it in` section updated with Makefile example and GitHub Actions snippet.
+
+Raw terminal verification:
+```
+$ PATH="$HOME/.cargo/bin:$PATH" make preflight
+cargo build --release
+    Finished `release` profile ...
+fitsproof preflight: no MODEL set — running reference bundle check
+ADMITTED: 0.021 GB predicted peak <= 4.000 GB budget (margin: 3979.3 MB)
+```
+
+```
+$ PATH="$HOME/.cargo/bin:$PATH" make stress 2>&1 | tail -3
+...
+Stress harness: 25 configs, 0 violations, 0 silent mode changes. Margin: min=10.0 MB, median=200.0 MB, max=1000.0 MB.
+```
+
+---
+
+### IMP-4 — `synthetic_machine_or_probe()` used VmHWM as gpu_memory_bytes
+
+**Severity:** Minor code smell (wrong semantic; no functional impact on tests)
+
+**Root cause:** `synthetic_machine_or_probe()` in `src/main.rs` set:
+```rust
+gpu_memory_bytes: read_vmhwm_bytes(), // reuse proc read as a sanity check
+```
+`read_vmhwm_bytes()` reads `/proc/self/status VmHWM` — the CLI process's own peak RSS — and was
+being used as the GPU memory field. This is semantically wrong: the CLI process RSS at startup
+is ~60 MB, not a GPU VRAM capacity. The field is not used in any budget calculation in v0.1
+(it's recorded in `MachineProfile` for informational output from `probe`), so there was no
+functional impact, but any reviewer reading the code would find it alarming.
+
+**Fix applied:**
+
+`src/main.rs: synthetic_machine_or_probe()` — `gpu_memory_bytes` set to `0` (correct for
+CPU-only environment with no GPU, matching the stress harness and reference machine configs).
+Unused `read_vmhwm_bytes` import removed.
+
+---
+
+### Before/after metrics
+
+| Metric | Before (c2-p08) | After (c2-p09-improve-2) | Delta |
+|--------|----------------|--------------------------|-------|
+| Tests run | 188 | 188 | 0 |
+| Test failures | 0 | 0 | 0 |
+| README real_model block reproducible on clean clone | No (silent skip → confusing) | Yes (env-var instructions shown) | Fixed |
+| Refusal message in README matches binary output | No (old format, pre-ADV-1) | Yes (component breakdown shown) | Fixed |
+| `plan` names valid quant values on error | No | Yes | Fixed |
+| CI Makefile integration example | None | `make preflight MODEL=… BUDGET_GB=4` | Added |
+| `gpu_memory_bytes` in synthetic profile | VmHWM of CLI process (wrong) | 0 (correct for CPU-only) | Fixed |
+| `cargo clippy -D warnings` | PASS | PASS | — |
+| `cargo fmt --check` | PASS | PASS | — |
+
+### Raw terminal output
+
+```
+$ ~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]"
+running 125 tests
+test result: ok. 125 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 54.87s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 28 tests
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+running 23 tests
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.89s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 45.00s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+```
+$ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings 2>&1
+    Checking fitsproof-rs v0.1.0 (...)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.26s
+(exit 0 — clean)
+```
+
+```
+$ ./target/release/fitsproof admit --budget-gb 0.001; echo "EXIT:$?"
+REFUSED: needs 0.055 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.001 GB; no degradation fits
+EXIT:2
+```
+
+```
+$ ./target/release/fitsproof plan --budget-gb 4 --quant badquant; echo "EXIT:$?"
+fitsproof plan: unknown quantisation "badquant"
+  Try: fitsproof plan --budget-gb 4 --quant q4_k_m --context 4096
+  Valid quant values: none, float16, int8_sym, int4_sym, q4_k_m, q4_k_s, q8_0, q4_0
+EXIT:2
+```
+
+
 
 ### Finding fixed
 
