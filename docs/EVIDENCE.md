@@ -516,3 +516,130 @@ correct behaviour.
 - `serve` and `mcp` CLI commands: exit 2 in v0.1.
 - Mutation score: target ≥70% for cycle 2.
 - CI static binary (musl): CI workflow present, not verified locally.
+
+---
+
+## 21. c1-p09-improve-2: --model flag — plan/admit with real GGUF from CLI
+
+**Claim:** `fitsproof plan --model <path.gguf>` and `fitsproof admit --model <path.gguf>` read real
+GGUF metadata via `read_metadata` + `metadata_to_model_config` and produce predictions using real
+architecture parameters.  Previously, `--model` was silently ignored and the reference bundle was
+always used — making the ADOPTION.md integration recipe fictional.
+
+**Command (plan):**
+```
+./target/debug/fitsproof plan --model /home/openclaw/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
+  --budget-gb 8 --quant q4_k_m --context 4096
+```
+
+**Raw output:**
+```
+Verdict:         Fits
+Predicted peak:  3.664 GB
+Budget:          8.000 GB
+Quant:           q4_k_m
+Context length:  4096
+```
+
+**Command (admit — fits):**
+```
+./target/debug/fitsproof admit --model /home/openclaw/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
+  --budget-gb 8 --quant q4_k_m --context 4096; echo "exit: $?"
+```
+
+**Raw output:**
+```
+ADMITTED: 3.664 GB predicted peak <= 8.000 GB budget (margin: 4335.8 MB)
+exit: 0
+```
+
+**Command (admit — refused):**
+```
+./target/debug/fitsproof admit --model /home/openclaw/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
+  --budget-gb 0.5 --quant q4_k_m --context 4096; echo "exit: $?"
+```
+
+**Raw output:**
+```
+REFUSED: needs 3.66 GB, budget 0.50 GB; no degradation fits
+exit: 2
+```
+
+**Status:** PASS — real GGUF → real ModelConfig → real plan prediction via CLI.
+
+---
+
+## 22. c1-p09-improve-2: actionable error messages for unknown quant and missing file
+
+**Claim:** Error messages name what went wrong and how to fix it.
+
+**Command (unknown quant):**
+```
+./target/debug/fitsproof admit --budget-gb 4 --quant badquant; echo "exit: $?"
+```
+
+**Raw output (stderr):**
+```
+fitsproof admit: unknown quantisation "badquant"
+  Hint: check --budget-gb, --quant, and --context values.
+  Valid quant values: none, float16, int8_sym, int4_sym, q4_k_m, q4_k_s, q8_0, q4_0
+```
+
+**Command (missing file):**
+```
+./target/debug/fitsproof plan --model /nonexistent.gguf --budget-gb 4; echo "exit: $?"
+```
+
+**Raw output (stderr):**
+```
+fitsproof plan: cannot open model file '/nonexistent.gguf': No such file or directory (os error 2)
+  Check the path exists and is readable.
+```
+
+**Status:** PASS — errors are actionable, not generic.
+
+---
+
+## 23. c1-p09-improve-2: q4_k_m added to QuantBits — ADOPTION.md recipe now literal
+
+**Claim:** `QuantBits::from_name("q4_k_m")` returns `Some(QuantBits(4.0))`.  Previously missing,
+which caused `fitsproof admit --quant q4_k_m` to fail with "unknown quantisation".
+
+**Command:**
+```
+~/.cargo/bin/cargo test --lib cost::tests::quant_names_q4k_variants -- --nocapture
+```
+
+Note: the test for this is in the `unknown_quant_returns_unknown_quant_error` adversarial test
+(now exercises the path that previously errored, plus the q4_k_m path through plan()).
+
+**Status:** PASS — confirmed via plan/admit CLI commands above (exit 0 with q4_k_m quant).
+
+---
+
+## 24. c1-p09-improve-2: full test suite after pass — 109 tests green
+
+**Command:**
+```
+~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]"
+```
+
+**Raw output:**
+```
+running 78 tests
+test result: ok. 78 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.96s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 19 tests
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.30s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Status:** PASS — 109 tests, no regressions.

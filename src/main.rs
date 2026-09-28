@@ -6,6 +6,7 @@
 use std::process::ExitCode;
 
 use fitsproof::admit::{admit, AdmitStatus};
+use fitsproof::gguf::{metadata_to_model_config, read_metadata};
 use fitsproof::model::ModelConfig;
 use fitsproof::plan::plan;
 use fitsproof::probe::{probe, MachineProfile};
@@ -33,7 +34,9 @@ COMMANDS:
 EXAMPLES:
     fitsproof probe
     fitsproof admit --budget-gb 4
-    fitsproof admit --budget-gb 0.001    # REFUSED — names the binding constraint, exit 2
+    fitsproof admit --budget-gb 0.001              # REFUSED — names the binding constraint, exit 2
+    fitsproof plan --model /path/to/model.gguf --budget-gb 8
+    fitsproof admit --model /path/to/model.gguf --budget-gb 4 --quant q4_k_m --context 4096
     fitsproof stress
     fitsproof verify --budget-gb 4
 ";
@@ -97,7 +100,11 @@ fn cmd_plan(args: &[String]) -> ExitCode {
         .and_then(|s| s.parse().ok())
         .unwrap_or(512);
 
-    let cfg = ModelConfig::reference();
+    let cfg = match load_model_config(args, "plan") {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+
     let machine = synthetic_machine_or_probe();
     let budget_bytes = (budget_gb * 1e9) as u64;
 
@@ -118,6 +125,7 @@ fn cmd_plan(args: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("fitsproof plan: {e}");
+            eprintln!("  Try: fitsproof plan --budget-gb 4 --quant q4_k_m --context 4096");
             ExitCode::from(2)
         }
     }
@@ -134,7 +142,11 @@ fn cmd_admit(args: &[String]) -> ExitCode {
         .and_then(|s| s.parse().ok())
         .unwrap_or(512);
 
-    let cfg = ModelConfig::reference();
+    let cfg = match load_model_config(args, "admit") {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+
     let machine = synthetic_machine_or_probe();
     let budget_bytes = (budget_gb * 1e9) as u64;
 
@@ -150,6 +162,8 @@ fn cmd_admit(args: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("fitsproof admit: {e}");
+            eprintln!("  Hint: check --budget-gb, --quant, and --context values.");
+            eprintln!("  Valid quant values: none, float16, int8_sym, int4_sym, q4_k_m, q4_k_s, q8_0, q4_0");
             ExitCode::from(2)
         }
     }
@@ -167,13 +181,27 @@ fn cmd_verify(args: &[String]) -> ExitCode {
         .and_then(|s| s.parse().ok())
         .unwrap_or(512);
 
-    let cfg = ModelConfig::reference();
+    // When --model is given, warn that verify runs the reference bundle (v0.1 limitation).
+    if parse_flag(args, "--model").is_some() {
+        eprintln!("fitsproof verify: note — v0.1 runs the reference bundle (random weights).");
+        eprintln!(
+            "  plan() uses real metadata from the GGUF file; generation uses random weights."
+        );
+        eprintln!("  Full real-weight verify is a v0.2 scope item.");
+    }
+
+    let cfg = match load_model_config(args, "verify") {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+
     let machine = synthetic_machine_or_probe();
 
     let p = match plan(&cfg, &machine, context_len, budget_bytes, &quant, 0.6) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("fitsproof verify: plan error: {e}");
+            eprintln!("  Hint: check --budget-gb, --quant, and --context values.");
             return ExitCode::from(2);
         }
     };
@@ -186,8 +214,9 @@ fn cmd_verify(args: &[String]) -> ExitCode {
     }
 
     // Run reference model and measure.
-    let weights = fitsproof::engine::transformer::Weights::reference(&cfg);
-    let mut transformer = fitsproof::engine::transformer::Transformer::new(cfg, weights);
+    let ref_cfg = ModelConfig::reference();
+    let weights = fitsproof::engine::transformer::Weights::reference(&ref_cfg);
+    let mut transformer = fitsproof::engine::transformer::Transformer::new(ref_cfg, weights);
 
     let vr = verify_run(
         move || {
@@ -216,7 +245,8 @@ fn cmd_verify(args: &[String]) -> ExitCode {
             println!("budget:         {:.3} GB", record.budget_bytes as f64 / 1e9);
             println!("budget_respected: {}", record.budget_respected);
             if !record.budget_respected {
-                eprintln!("BUDGET VIOLATED");
+                eprintln!("BUDGET VIOLATED: VmHWM exceeded declared budget.");
+                eprintln!("  Reduce --context or use a lower --quant tier.");
                 ExitCode::from(2)
             } else {
                 ExitCode::SUCCESS
@@ -380,6 +410,53 @@ fn parse_flag(args: &[String], flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Load a `ModelConfig` from `--model <path>` if given, otherwise use the reference bundle.
+///
+/// Returns `Err(ExitCode)` if the path was given but the file could not be read.
+/// The `subcommand` string is used in error messages so the user knows which command failed.
+fn load_model_config(args: &[String], subcommand: &str) -> Result<ModelConfig, ExitCode> {
+    match parse_flag(args, "--model") {
+        None => Ok(ModelConfig::reference()),
+        Some(path) => {
+            let file = match std::fs::File::open(&path) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("fitsproof {subcommand}: cannot open model file '{path}': {e}");
+                    eprintln!("  Check the path exists and is readable.");
+                    return Err(ExitCode::from(2));
+                }
+            };
+            let meta = match read_metadata(std::io::BufReader::new(file)) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!(
+                        "fitsproof {subcommand}: failed to read GGUF header from '{path}': {e}"
+                    );
+                    eprintln!("  The file must be a valid GGUF v1/v2/v3 model file.");
+                    eprintln!(
+                        "  Obtain a GGUF model from HuggingFace (search for Q4_K_M variants)."
+                    );
+                    return Err(ExitCode::from(2));
+                }
+            };
+            let model_name = std::path::Path::new(&path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("model");
+            match metadata_to_model_config(&meta, model_name) {
+                Ok(cfg) => Ok(cfg),
+                Err(e) => {
+                    eprintln!(
+                        "fitsproof {subcommand}: could not extract architecture from '{path}': {e}"
+                    );
+                    eprintln!("  Supported architectures: llama, qwen2, qwen3, gemma, phi, mistral, falcon, gpt2, bloom.");
+                    Err(ExitCode::from(2))
+                }
+            }
+        }
+    }
 }
 
 /// For CLI use: use a fast synthetic profile to avoid waiting for live probe.

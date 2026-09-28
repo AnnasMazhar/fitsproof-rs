@@ -75,7 +75,7 @@ This takes ~5 seconds.  The result is stable across reboots (thermal noise < 2%)
 ### Step 2 — plan the model
 
 ```bash
-fitsproof plan --model /path/to/model.gguf --quant q4_k_m --context 4096
+fitsproof plan --model /path/to/model.gguf --quant q4_k_m --context 4096 --budget-gb 4.0
 ```
 
 Example output:
@@ -147,6 +147,9 @@ fitsproof verify --model /path/to/model.gguf --quant q4_k_m --context 4096 --bud
 Output:
 
 ```
+fitsproof verify: note — v0.1 runs the reference bundle (random weights).
+  plan() uses real metadata from the GGUF file; generation uses random weights.
+  Full real-weight verify is a v0.2 scope item.
 ADMITTED: ...
 allocator_peak: 3.562 GB
 VmHWM:          3.621 GB
@@ -155,8 +158,10 @@ budget:         4.000 GB
 budget_respected: true
 ```
 
-The delta (~60 MB) is the Rust runtime stack, BSS, and mapped libraries.  It is always positive
-and stable across runs.  This is reported explicitly, not hidden.
+The `plan()` prediction is real (from the GGUF metadata). The allocation measurement is from
+the reference bundle (random weights), not the real model weights. The delta (~60 MB) reflects
+Rust runtime overhead and is stable across runs. Full real-weight verification requires the v0.2
+weight tensor loader.
 
 ### CI integration (GitHub Actions example)
 

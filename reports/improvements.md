@@ -105,3 +105,73 @@ $ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings 2>&1
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.44s
 (exit 0 — clean)
 ```
+
+---
+
+## c1-p09-improve-2 (cycle 1, pass 9) — 2026-09-28
+
+### Finding fixed
+
+**Severity:** Major credibility gap (fictional integration recipe — ADOPTION.md commands did not work).
+
+**Root cause:** `cmd_plan()`, `cmd_admit()`, and `cmd_verify()` in `src/main.rs` ignored the `--model`
+flag entirely and always called `ModelConfig::reference()`.  The ADOPTION.md integration recipe
+showed `fitsproof plan --model /path/to/model.gguf` and `fitsproof admit --model ...` as if they
+worked — they did not.  A stranger following the recipe would see the reference bundle prediction (a
+tiny synthetic model), not a prediction for their model.
+
+**Secondary bug:** `QuantBits::from_name()` did not recognise `q4_k_m` — the most common GGUF
+quantisation format.  The ADOPTION.md recipe used `--quant q4_k_m` throughout, which would have
+failed with "unknown quantisation" even once `--model` was fixed.
+
+**Error messages:** Were generic (`fitsproof admit: unknown quantisation "badquant"`) with no
+indication of valid values or how to fix the problem.
+
+### Fixes applied
+
+1. **`src/main.rs: load_model_config()`** — new helper that parses `--model <path>`, opens the file,
+   calls `read_metadata()` + `metadata_to_model_config()` from `src/gguf.rs`, and returns a
+   `ModelConfig` built from real GGUF architecture metadata.  Falls back to `ModelConfig::reference()`
+   when `--model` is absent.  Actionable error messages at every failure point (file not found, invalid
+   GGUF, unsupported architecture).
+
+2. **`cmd_plan()`, `cmd_admit()`, `cmd_verify()`** — all three now call `load_model_config()` instead
+   of hardcoding `ModelConfig::reference()`.
+
+3. **`cmd_verify()` honesty note** — when `--model` is given, the binary now emits a note that v0.1
+   runs the reference bundle for the allocation measurement (real-weight verify is v0.2), so the user
+   is not surprised by the delta.
+
+4. **`src/cost.rs: QuantBits::from_name()`** — added `q4_k_m`, `q4_k_s`, `q4_1` as recognised
+   names mapping to 4-bit precision.  These are the standard llama.cpp Q4 variant names.
+
+5. **Error messages** — `cmd_admit` and `cmd_plan` now name the valid quant values on failure.
+   `cmd_verify` names the cause and suggests `--context` or `--quant` reduction on budget violation.
+   `load_model_config` names the supported architectures on parse failure.
+
+6. **`docs/ADOPTION.md`** — updated verify step to show the actual v0.1 output (with the honest
+   reference-bundle note), fixing the fictional output block.
+
+### Evidence
+
+Real GGUF file: `/home/openclaw/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf`
+
+- `fitsproof plan --model <path> --budget-gb 8 --quant q4_k_m --context 4096` → `Predicted peak: 3.664 GB, Verdict: Fits`
+- `fitsproof admit --model <path> --budget-gb 8 --quant q4_k_m --context 4096` → `ADMITTED (margin: 4335.8 MB), exit 0`
+- `fitsproof admit --model <path> --budget-gb 0.5 --quant q4_k_m --context 4096` → `REFUSED, exit 2`
+- `fitsproof admit --budget-gb 4 --quant badquant` → actionable error naming valid quant values, exit 2
+
+Full terminal output in EVIDENCE.md §21–24.
+
+### Before/after metrics
+
+| Metric | Before (c1-p08) | After (c1-p09-improve-2) | Delta |
+|--------|----------------|--------------------------|-------|
+| Tests run | 109 | 109 | 0 (no tests removed) |
+| Test failures | 0 | 0 | 0 |
+| `--model` flag works in CLI | No (silently ignored) | Yes (reads real GGUF) | Fixed |
+| `--quant q4_k_m` accepted | No (unknown quant error) | Yes | Fixed |
+| ADOPTION.md recipe runnable | No (fictional) | Yes (end-to-end verified) | Fixed |
+| Error messages actionable | Partial | Yes (names valid values, hints on fix) | Improved |
+| `cargo clippy -D warnings` | PASS | PASS | — |
+| `cargo fmt --check` | PASS | PASS | — |

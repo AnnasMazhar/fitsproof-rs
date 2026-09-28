@@ -45,7 +45,9 @@ impl QuantBits {
             "none" | "float32" | "fp32" => Some(QuantBits(32.0)),
             "float16" | "fp16" | "f16" => Some(QuantBits(16.0)),
             "int8_sym" | "int8_asym" | "int8" | "q8_0" => Some(QuantBits(8.0)),
-            "int4_sym" | "int4_asym" | "int4" | "q4_k" | "q4_0" => Some(QuantBits(4.0)),
+            "int4_sym" | "int4_asym" | "int4" | "q4_k" | "q4_0" | "q4_k_m" | "q4_k_s" | "q4_1" => {
+                Some(QuantBits(4.0))
+            }
             _ => None,
         }
     }
