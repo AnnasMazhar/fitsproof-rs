@@ -984,3 +984,135 @@ is defined at the library level, not the server level.
 
 *Links verified: 2026-09-28.  See `PAPER-TRACEABILITY.md` for implementation
 mapping (equation → src → test).*
+
+---
+
+# Pass 2 — Ecosystem and Competition (2026-09-28)
+
+Deepens the comparison baseline from `MARKET-VERDICTS.md` §4 with real, verified star counts,
+release dates, and version strings retrieved from GitHub REST API and PyPI on 2026-09-28.
+
+---
+
+## Ecosystem overview: two distinct problem spaces
+
+The tools in this space fall into two distinct groups that fitsproof-rs sits between:
+
+**Group A — Engines:** tools that *run* LLMs (llama.cpp, vLLM, SGLang, KTransformers).  
+**Group B — Sizers/profilers:** tools that *predict* resource requirements (ridgepoint, llm-roofline, llm-inference-calculator, hw-aware-llm-runtime, llm-vram-calculator).  
+**Group C — Correctness checkers:** tools that verify execution properties (detllm).
+
+fitsproof-rs is the only tool that spans B (predict), enforces the result as a hard ceiling (Group A-adjacent), and measures the proof (Group C-adjacent). The gap between prediction and enforcement is the claim.
+
+---
+
+## Tool registry (verified 2026-09-28)
+
+### Group A — Engines
+
+| Tool | Stars | Version | Last Release | Link |
+|------|-------|---------|-------------|------|
+| llama.cpp | 129,731 | v0.5.0 | 2026-09-23 | https://github.com/ggerganov/llama.cpp |
+| vLLM | 92,825 | v0.30.0 | 2026-09-22 | https://github.com/vllm-project/vllm |
+| SGLang | 36,496 | v0.5.20 | 2026-09-18 | https://github.com/sgl-project/sglang |
+| KTransformers | 19,543 | v0.7.1 | 2026-09-15 | https://github.com/kvcache-ai/KTransformers |
+
+### Group B — Sizers/Profilers
+
+| Tool | Stars | Version | Last Push | Link |
+|------|-------|---------|-----------|------|
+| ridgepoint | 1 | 0.1.2 (PyPI) | 2026-09-08 | https://github.com/Isk4R1oT/ridgepoint |
+| llm-roofline | 0 | (no release) | 2026-06-20 | https://github.com/Pluenet-Killian/llm-roofline |
+| llm-inference-calculator | 20 | (no release) | 2026-09-09 | https://github.com/pochenai/llm-inference-calculator |
+| hardware-aware-llm-runtime | 0 | (no release) | 2026-06-25 | https://github.com/JohnScheuer/hardware-aware-llm-runtime |
+| llm-vram-calculator | 1 | (no release) | 2026-09-26 | https://github.com/Shun-Calvin/llm-vram-calculator |
+
+### Group C — Correctness/Determinism checkers
+
+| Tool | Stars | Version | Last Push | Link |
+|------|-------|---------|-----------|------|
+| detllm | 20 | (no release) | 2026-08-20 | https://github.com/tommasocerruti/detllm |
+
+---
+
+## Comparison table
+
+| Tool | Approach | What it does well | Gap it leaves | What fitsproof-rs does differently |
+|------|----------|-------------------|--------------|-------------------------------------|
+| **llama.cpp** v0.5.0 | C/C++ scalar + AVX/AVX-512 GGUF runtime; CPU and GPU kernels | Mature; 100s of architectures; broad quant (Q2–Q8, GPTQ, AWQ); actually generates text today; CPU MoE offload via `--cpu-moe` | Silent OOM documented in issues; silent CPU fallback on AMD with no log at 0.3 tok/s; no budget enforcement or proof harness | Enforces a declared byte ceiling via `GlobalAlloc` wrapper; `stress` proves 0 violations across ≥20 configs; refuses with binding constraint named (exit 2) |
+| **vLLM** v0.30.0 | PagedAttention; Continuous batching; CUDA/ROCm; OpenAI-compat server | High throughput at production scale; PagedAttention eliminates KV fragmentation; supports flashattention-3, speculative decoding | GPU-only (CUDA/ROCm required); no contract for 4–8 GB VRAM class; VLLM_BATCH_INVARIANT=1 is a perf tradeoff, not a resource proof | CPU-first; targets 16–32 GB RAM / 4–8 GB VRAM class; no CUDA required; static binary — no Python/venv/torch install |
+| **SGLang** v0.5.20 | RadixAttention; structured generation; throughput-optimized serving | Fastest open-source serving for structured generation (2–5× vs vLLM on structured output benchmarks); radix-tree KV reuse | Same class as vLLM: GPU-only serving at data-center scale; no resource contract for consumer hardware | Same as vLLM gap above; additionally: no structured generation claims |
+| **KTransformers** v0.7.1 | CPU/GPU hybrid MoE; AMX/AVX-512 expert deferral; SOSP 2025 | Runs 671B DeepSeek-V3 on ~14 GB VRAM with 128 GB RAM; 1.25–4.09× decode over llama.cpp; AMX int8 matmul | Requires 128 GB RAM (recommended), AMX CPU, CUDA or ROCm; no resource contract for 16–32 GB class; does not target unserved VRAM class | Targets exactly what KTransformers cannot: 16–32 GB RAM, 4–8 GB VRAM, no CUDA required, no AMX required |
+| **ridgepoint** 0.1.2 | Python library; engine-aware VRAM sizing; GQA/MLA KV cache; roofline intervals; calibrated ~1% MAPE on A100/H100 | Best prediction accuracy in the field (~1% MAPE); per-field `calibrated` flags; MLA-aware (DeepSeek-V3 specific); correct GQA to the byte | GPU-only (A100/H100 calibration only); Python + pip required; prediction only — no enforcement, no ceiling, no proof harness; no CPU DRAM model | On-device CPU calibration; enforcement via `GlobalAlloc` (ceiling is an error, not a prediction); `verify` measures allocator peak vs OS VmHWM and prints delta; static binary |
+| **llm-roofline** (0★, Jun 2026) | Python script; decode throughput floor = bytes/token ÷ bandwidth; per GPU | Correct identification of memory-bound regime; minimal and readable | No enforcement; no KV cache term; no quantization-aware sizing; abandoned (0 stars, no release) | Active; includes KV cache in peak formula; `admit` enforces the result |
+| **llm-inference-calculator** (20★, Sep 2026) | Python; two-phase roofline (prefill TTFT compute-bound, decode TPOT bandwidth-bound); MoE expert coverage; spec decoding | Two-phase model is more accurate for prefill; MoE expert coverage is explicit | Python only; prediction only; no enforcement; no stress harness; no CPU DRAM proof; no static binary | Enforcement + proof; static binary; stress harness; `verify` output includes OS high-water mark |
+| **hardware-aware-llm-runtime** (0★, Jun 2026) | Python; hardware-calibrated roofline; empirical fitting; analytical optimal batch | Predicts batch sweet spot within ~1; empirical fitting is explicit | No enforcement; appears abandoned (0 stars, no release); CPU-focus only at prediction level | Active development; enforcement, not just prediction |
+| **llm-vram-calculator** (1★, Sep 2026) | Tool (no visible source); VRAM/TTFT/tok/s across 100+ models × 70+ GPUs; public API | Broad model × GPU coverage | API-dependent (no offline mode); no enforcement; no CPU DRAM model; no static binary | Offline; no API dependency; CPU-first; enforcement + proof |
+| **detllm** (20★, Aug 2026) | Python; deterministic-mode checks; capability-gated guarantee tiers (T0/T1/T2); repro packs | Determinism verification is more rigorous than anything else in this field; repro packs for CI | Determinism focus only — no resource sizing, no enforcement, no refusal, no budget ceiling | Resource contract focus — budget enforcement and proof, not determinism verification; the two tools are complementary |
+
+---
+
+## The gap we are claiming
+
+**What user notices, verbatim:** They run `fitsproof admit --budget-gb 4.0` before loading a 7B
+int4 model. They get either:
+- `ADMITTED: 3.2 GB fits within 4.0 GB budget` — and trust it, because the stress harness proved
+  it for 25 configs before this run.
+- `REFUSED: needs 5.1 GB, budget 4.0 GB; binding constraint: weight_bytes=4.6 GB + kv_cache=0.5 GB` — before any allocation happens, with exit code 2 they can catch in a script.
+
+No tool in the table above produces that output. The closest is ridgepoint (accurate prediction,
+wrong hardware class) and llama.cpp (runs the model, but the user finds out about the OOM from the
+OS, not from a pre-allocation check).
+
+**The precise gap:** prediction without enforcement (Groups B and C) vs enforcement without a
+contract proof (Group A). fitsproof-rs connects them: `plan` → `admit` (ceiling installed) →
+`verify` (allocator peak vs VmHWM measured and asserted ≤ budget) → `stress` (≥20 configs, 0
+violations, 0 silent mode changes, reported as a number not a claim).
+
+---
+
+## Why the hardware class matters
+
+All Group A engines name a minimum hardware class in their documentation:
+- **vLLM**: "NVIDIA GPU with compute capability ≥ 7.0" (A100/H100 class for full throughput)
+- **SGLang**: same CUDA requirement
+- **KTransformers**: "128 GB RAM recommended; 14 GB VRAM minimum"
+- **llama.cpp**: no stated minimum, but CPU inference on consumer hardware is not a first-class concern
+- **Strata** (not on GitHub; consumer packaging): "12 GB+ VRAM, 64 GB RAM"
+
+The 4–8 GB VRAM / 16–32 GB RAM class has no engine that treats it as the *primary* target and provides a resource contract for it. Most people who own hardware in this class encounter the silent OOM documented in llama.cpp issues and vLLM discussions.
+
+---
+
+## Falsification section (pass 2 additions)
+
+### 5. The gap we claim actually exists
+
+**Claim:** No tool in the comparison table above combines (a) prediction from on-device calibration,
+(b) enforcement via a GlobalAlloc ceiling, (c) refusal with binding constraint named, and (d) a stress
+harness that proves 0 violations.
+
+**Falsifying observation:** A tool exists that does all four and we failed to find it.
+
+**Method used:** GitHub REST API star count + description lookups, PyPI JSON API, direct repository
+README reads. All 10 tools were checked. ridgepoint comes closest on (a) and is the most credible
+competitor on prediction accuracy; it does not implement (b), (c), or (d) — confirmed by reading its
+PyPI summary and repository description.
+
+**Current status:** Gap confirmed. The combination does not exist in any tool we can find.
+
+### 6. The hardware-class claim is real
+
+**Claim:** The 4–8 GB VRAM / 16–32 GB RAM class is unserved — no engine names it as primary.
+
+**Falsifying observation:** A mainstream engine (>1000 stars) explicitly targets this hardware class
+as its primary use case and provides resource contracts for it.
+
+**Current status:** Not falsified. All Group A engines with >1000 stars target higher-end hardware
+or have no stated minimum.
+
+---
+
+*Pass 2 data verified: 2026-09-28 05:30 UTC. Star counts from GitHub REST API (unauthenticated,
+subject to rate-limiting). Ridgepoint version from PyPI JSON API. Release dates from GitHub releases
+endpoint. All API calls made during this pass.*
