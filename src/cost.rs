@@ -294,26 +294,37 @@ mod tests {
     }
 
     /// Fault detected: embedding table omitted from weight_bytes.
+    ///
     /// Hand-computed for reference config (6L, 384H, 6Q-heads, 2KV-heads, 64 hd, 1536 ff, 512V):
     ///
-    /// embed = 512 * 384 * 4 = 786_432 bytes (fp32)
-    /// attn/layer (fp32): (6*64*384 + 2*64*384 + 2*64*384 + 384*6*64)*4 = (147456+49152+49152+147456)*4 = 1_573_824
-    /// ffn/layer (fp32): (1536*384 + 1536*384 + 384*1536)*4 = 3*589824*4 = 7_077_888
-    /// norm/layer: 2*384*4 = 3_072
-    /// final: 384*4 + 512*384*4 = 1_536 + 786_432 = 787_968
-    /// total = 786432 + 6*(1_573_824 + 7_077_888 + 3_072) + 787_968
-    ///       = 786432 + 6*8_654_784 + 787_968
-    ///       = 786432 + 51_928_704 + 787_968 = 53_503_104
+    ///   embed            = 512 * 384 * 4                    =    786_432  (fp32)
+    ///   attn Q/layer     = 6 * 64 * 384 * 4                =    589_824
+    ///   attn K/layer     = 2 * 64 * 384 * 4                =    196_608
+    ///   attn V/layer     = 2 * 64 * 384 * 4                =    196_608
+    ///   attn O/layer     = 384 * 6 * 64 * 4                =    589_824
+    ///   attn/layer total                                    =  1_572_864
+    ///   ffn gate/layer   = 1536 * 384 * 4                  =  2_359_296
+    ///   ffn up/layer     = 1536 * 384 * 4                  =  2_359_296
+    ///   ffn down/layer   = 384 * 1536 * 4                  =  2_359_296
+    ///   ffn/layer total                                     =  7_077_888
+    ///   norm/layer       = 2 * 384 * 4                     =      3_072
+    ///   per-layer total  = 1_572_864 + 7_077_888 + 3_072   =  8_653_824
+    ///   6 layers         = 6 * 8_653_824                   = 51_922_944
+    ///   final norm       = 384 * 4                         =      1_536
+    ///   unembed          = 512 * 384 * 4                   =    786_432
+    ///   total = 786_432 + 51_922_944 + 1_536 + 786_432     = 53_497_344
+    ///
+    /// Source: formula from cost.rs weight_bytes(), traced term by term.
+    /// This is an exact match — no tolerance.
     #[test]
     fn weight_bytes_reference_fp32_known_answer() {
         let cfg = ref_cfg();
         let wb = weight_bytes(&cfg, "none");
-        // Verify: within 1% of hand-computed 53_503_104
-        let expected: u64 = 53_503_104;
-        let delta = (wb as i64 - expected as i64).unsigned_abs();
-        assert!(
-            delta <= expected / 100,
-            "weight_bytes fp32 got {wb}, expected ~{expected} (delta {delta})"
+        // Exact hand-computed value — see derivation above.
+        let expected: u64 = 53_497_344;
+        assert_eq!(
+            wb, expected,
+            "weight_bytes fp32 expected {expected}, got {wb}"
         );
     }
 
@@ -392,5 +403,104 @@ mod tests {
     fn weight_bytes_panics_on_unknown_quant() {
         let cfg = ref_cfg();
         let _ = weight_bytes(&cfg, "int2_mystery");
+    }
+
+    // -----------------------------------------------------------------------
+    // Property-based tests (proptest)
+    //
+    // Properties come from the method's assumptions, not from the implementation.
+    // Source for each property is cited in the assertion comment.
+    // -----------------------------------------------------------------------
+
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Property (GQA, Ainslie et al. 2023):
+        /// kv_cache_bytes is strictly monotonically increasing in context_len.
+        ///
+        /// Fault detected: formula is non-monotone (e.g. integer overflow at large contexts
+        /// or incorrect use of integer division).
+        #[test]
+        fn kv_cache_bytes_monotone_in_context_len(
+            a in 1usize..512,
+            b in 513usize..1024,
+        ) {
+            let cfg = ref_cfg();
+            let small = kv_cache_bytes(&cfg, a, "none");
+            let large = kv_cache_bytes(&cfg, b, "none");
+            prop_assert!(
+                large > small,
+                "kv_cache_bytes must be strictly increasing in context_len: ctx={a} got {small}, ctx={b} got {large}"
+            );
+        }
+
+        /// Property (roofline, Williams et al. 2009 §3):
+        /// decode_tok_s is strictly monotonically increasing in bandwidth_utilisation.
+        ///
+        /// Fault detected: formula ignores the utilisation parameter (off-by-one, wrong variable).
+        #[test]
+        fn decode_tok_s_monotone_in_utilisation(
+            low in 0.1f64..0.5,
+            high in 0.6f64..1.0,
+        ) {
+            let cfg = ref_cfg();
+            let machine = ref_machine();
+            let t_low = decode_tok_s(&cfg, &machine, "none", low);
+            let t_high = decode_tok_s(&cfg, &machine, "none", high);
+            prop_assert!(
+                t_high > t_low,
+                "decode_tok_s must increase with bandwidth_utilisation: {low} -> {t_low}, {high} -> {t_high}"
+            );
+        }
+
+        /// Property (quantisation bits hierarchy):
+        /// weight_bytes at lower precision ≤ weight_bytes at higher precision.
+        ///
+        /// Fault detected: QuantBits::from_name returns wrong bits/element, breaking ordering.
+        #[test]
+        fn weight_bytes_precision_ordering(
+            n_layers in 1usize..8,
+            hidden in 64usize..512,
+        ) {
+            // Build a minimal config; use fixed values for the rest.
+            let cfg = crate::model::ModelConfig {
+                num_layers: n_layers,
+                hidden_size: hidden,
+                num_heads: 4,
+                num_kv_heads: 2,
+                head_dim: 32,
+                intermediate_size: hidden * 4,
+                vocab_size: 256,
+                max_seq_len: 512,
+                name: "proptest-config".into(),
+            };
+            let fp32 = weight_bytes(&cfg, "none");
+            let int8 = weight_bytes(&cfg, "int8_sym");
+            let int4 = weight_bytes(&cfg, "int4_sym");
+            prop_assert!(
+                int4 <= int8,
+                "int4 weight_bytes must be <= int8: int4={int4}, int8={int8}"
+            );
+            prop_assert!(
+                int8 <= fp32,
+                "int8 weight_bytes must be <= fp32: int8={int8}, fp32={fp32}"
+            );
+        }
+
+        /// Property: total_peak_bytes = weight + kv_cache + activation, for any context_len.
+        ///
+        /// Fault detected: estimate() computes total independently rather than summing components.
+        #[test]
+        fn total_peak_is_sum_of_components_any_context(ctx in 1usize..2048) {
+            let cfg = ref_cfg();
+            let machine = ref_machine();
+            let est = estimate(&cfg, &machine, ctx, "none", 0.6);
+            let expected = est.weight_bytes + est.kv_cache_bytes + est.activation_bytes;
+            prop_assert!(
+                est.total_peak_bytes == expected,
+                "total_peak_bytes {} must equal sum of components {} at ctx={}",
+                est.total_peak_bytes, expected, ctx
+            );
+        }
     }
 }

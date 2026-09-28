@@ -268,6 +268,103 @@ test engine::quant::tests::int8_round_trip_within_one_lsb ... ok
 
 ---
 
+## 13. Property-based tests: kv_cache monotone, plan verdict ordering, quant range
+
+**Claim:** proptest property-based tests added for: kv_cache monotone in context_len,
+decode_tok_s monotone in utilisation, weight_bytes precision ordering, total_peak == sum
+of components, plan verdict monotone in budget, FitsWithDegradation implies fitting step,
+int8/int4 values in range, round-trip within 1 LSB, scale positive+finite.
+
+**Command:**
+```
+cargo test 2>&1 | grep -E "test result:|running [0-9]"
+```
+
+**Raw output:**
+```
+running 79 tests
+test result: ok. 79 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.74s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 51.15s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Status:** PASS — 91 tests total (79 lib + 1 real_model + 2 smoke + 3 stress + 6 value).
+
+---
+
+## 14. tests/value/test_incumbent_gap.rs — the two mandatory zero-case proofs
+
+**Claim:** `tests/value/test_incumbent_gap.rs` demonstrates the incumbent gap:
+(1) a config REFUSED with binding constraint named, (2) a config admitted ONLY after an
+emitted degradation record. These are the claims no incumbent (ridgepoint, detllm, llama.cpp) can make.
+
+**Command:**
+```
+cargo test --test test_incumbent_gap -- --nocapture
+```
+
+**Raw output:**
+```
+Running tests/value/test_incumbent_gap.rs
+running 6 tests
+test binding_constraint_names_sizes ... ok
+test degradation_record_describes_mode_change ... ok
+test refused_below_any_degradation_fits ... ok
+test degraded_config_emits_degradation_record ... ok
+test refused_config_is_not_degraded ... ok
+test refused_config_names_binding_constraint ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Status:** PASS
+
+---
+
+## 15. weight_bytes KAT now exact (not ±1%)
+
+**Claim:** `cost::tests::weight_bytes_reference_fp32_known_answer` verifies the
+exact computed value 53_497_344 against a hand-traced derivation in the test comment.
+Previous test used ±1% tolerance (vacuity risk per QUALITY-CONTRACT §1).
+
+**Command:**
+```
+cargo test --lib cost::tests::weight_bytes_reference_fp32_known_answer -- --nocapture
+```
+
+**Raw output:**
+```
+test cost::tests::weight_bytes_reference_fp32_known_answer ... ok
+```
+
+**Status:** PASS — exact match, no tolerance band.
+
+---
+
+## 16. clippy + fmt clean
+
+**Command:**
+```
+cargo clippy --all-targets -- -D warnings && cargo fmt --check
+```
+
+**Raw output:**
+```
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.18s
+```
+(both exit 0, no output = clean)
+
+**Status:** PASS
+
+---
+
 ## Open items / limitations (honest record)
 
 - Real-model generation (tokens, not just plan) requires full GGUF weight loader + tokenizer: **v0.2 scope**.
