@@ -371,3 +371,77 @@ Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.18s
 - `serve` and `mcp` CLI commands: **not implemented in v0.1** (exit 2 with message).
 - Mutation score: not measured in this cycle (cargo-mutants not installed). Target ≥70% for cycle 2.
 - CI static binary (musl): not tested locally (requires musl target); CI workflow is present.
+
+---
+
+## 17. Adversarial / byzantine tests: 19 edge cases
+
+**Claim:** `tests/adversarial.rs` adds 19 tests covering byzantine inputs that a naive
+implementation would miss: budget=0 errors, boundary faults (exact peak, peak-1), integer
+overflow in context_len and vocab_size, zero-layer/hidden-size models, unknown quant handling,
+AdmitRecord contract (refused/degraded fields), GGUF malformed inputs (truncated, wrong magic,
+version=0, empty), zero-bandwidth NaN guard, verdict monotonicity.
+
+**Command:**
+```
+cargo test --test adversarial 2>&1
+```
+
+**Raw output:**
+```
+running 19 tests
+test budget_exactly_at_predicted_peak_admits ... ok
+test budget_one_byte_below_peak_not_fits ... ok
+test fits_with_degradation_applied_degradation_is_some ... ok
+test budget_zero_returns_invalid_budget_error ... ok
+test context_len_zero_returns_invalid_context_error ... ok
+test gguf_wrong_magic_returns_error ... ok
+test integer_overflow_context_len ... ok
+test gguf_version_zero_returns_error ... ok
+test plan_verdict_monotone_in_budget ... ok
+test gguf_empty_file_returns_error ... ok
+test refused_record_has_refusal_reason ... ok
+test quant_unknown_in_cost_panics_not_silent ... ok
+test unknown_quant_returns_unknown_quant_error ... ok
+test zero_bandwidth_decode_tok_s_not_nan ... ok
+test gguf_truncated_header_returns_error ... ok
+test zero_hidden_size_does_not_crash ... ok
+test refused_record_no_applied_degradation ... ok
+test large_vocab_weight_bytes_not_zero ... ok
+test zero_layers_does_not_crash ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Status:** PASS
+
+---
+
+## 18. Full test suite: 110 tests (c1-p05-implement-2)
+
+**Claim:** `cargo test --all-targets` is green with 110 tests after implement-2 pass.
+
+**Command:**
+```
+cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]"
+```
+
+**Raw output:**
+```
+running 79 tests
+test result: ok. 79 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.72s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 19 tests
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 54.67s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Status:** PASS — 110 tests total (79 lib + 19 adversarial + 1 real_model + 2 smoke + 3 stress + 6 value).
