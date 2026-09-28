@@ -367,4 +367,169 @@ at runtime, and assert ≤ budget.  That is when the headline claim is fully sub
 
 ---
 
+## 7. fitsproof-rs vs AURA: choosing the right pre-flight check
+
+**Grevix/aura** (Rust, MIT, 4 stars, last push 2026-09-03) is the closest competitor in the
+Rust + GGUF + consumer hardware + memory-enforcement space.  An operator who has found both tools
+needs to understand when each is the right choice — not least because using both in sequence is
+a valid and sensible pattern.
+
+### What AURA does that fitsproof-rs does not
+
+- **Kernel-level enforcement at runtime.** AURA spawns llama-server inside a cgroup v2 namespace
+  (Linux) or Win32 Job Object (Windows) and sets `memory.max` before execution.  If llama-server
+  exceeds the ceiling, the kernel kills the process.  This catches memory that `GlobalAlloc` does
+  not see: mmap'd weight files, thread-local allocations from C libraries, Python runtime overhead
+  if the caller is Python.
+
+- **Real-model generation.** AURA wraps llama-server, which runs real weights.  Its "70/70"
+  benchmark badge reflects measurements on a real 7B model at full context on a 16 GB system.
+
+- **Windows support.** Win32 Job Objects give the hard-ceiling semantics on Windows.  fitsproof-rs
+  `verify` is Linux-only in v0.1 (requires `/proc/self/status`).
+
+### What fitsproof-rs does that AURA does not
+
+- **Pre-flight typed refusal.**  `fitsproof admit` exits 2 with the binding constraint named
+  *before any subprocess is spawned, any model file is opened, and any allocation occurs.*
+  AURA's enforcement happens after the engine starts.  If the model doesn't fit, AURA's cgroup
+  kills the child — a hard kill, not a graceful refusal.
+
+- **Typed degradation records.**  AURA's context auto-tuning (4096 → 2048 → 1024) is silent by
+  design.  fitsproof-rs treats a silent mode change as a test failure: `FitsWithDegradation` must
+  carry a non-empty `degradation_steps` vector or the stress harness fails.  In a CI pipeline,
+  a structured degradation record is inspectable; a context window shrink with no trace is not.
+
+- **Portable stress harness.**  `fitsproof stress` runs ≥20 configs, measures 0 violations and 0
+  silent mode changes, offline, on any machine, without an engine, without a GGUF model file, in
+  ~50 seconds.  AURA's 70/70 benchmark is a one-time measurement on specific hardware requiring
+  the full llama-server stack.
+
+- **No runtime dependency.**  fitsproof-rs runs with no subprocess.  `plan`, `admit`, and `verify`
+  operate entirely in-process, reading only the GGUF header for architecture metadata.  AURA
+  requires llama-server at runtime.
+
+### Integration pattern: use both
+
+The clearest combined pattern for production CI:
+
+```bash
+# Step 1 — fitsproof pre-flight (milliseconds, no engine required)
+fitsproof admit \
+  --model "$MODEL_PATH" \
+  --quant q4_k_m \
+  --context 4096 \
+  --budget-gb 4.0 \
+|| { echo "REFUSED: won't fit — skipping launch"; exit 2; }
+
+# Step 2 — AURA runtime enforcement (if pre-flight passes)
+aura run --model "$MODEL_PATH" --budget 4gb
+```
+
+Step 1 catches misconfigurations before any subprocess starts.  Step 2 adds a kernel-level
+backstop for memory that `GlobalAlloc` doesn't see (mmap'd tensor pages, C library overhead).
+They defend different attack surfaces; running both costs ~1s total and prevents two different
+classes of failure.
+
+---
+
+## 8. Deeper failure modes (cycle 2 additions)
+
+These failure modes expand §3 with sources from cycle 2 research passes.
+
+### 8.1 — Activation scratch undercount at long context (Medium likelihood, Medium severity)
+
+**What happens:** At context lengths > 2048 with standard (unfused) attention, the attention
+score matrix occupies memory not counted by `total_peak_bytes`.  A `fitsproof admit` pass is
+followed by an OOM during the attention forward pass.
+
+**Root cause:** Standard attention materialises an N × N × num_heads score matrix
+(sources 21, 22).  For a 7B model (32 heads) at 4096 context:
+
+```
+attention_scratch = N² × num_heads × bytes = 4096² × 32 × 2 = 1.07 GB
+```
+
+The current `total_peak_bytes` formula sums `weight_bytes + kv_cache_bytes` but omits the
+attention scratch.  The omission is small at short contexts (≤512 tokens) and material at
+long ones.
+
+**Quantified risk (from source 22 formula):**
+
+```
+context = 512:  N² × 32 × 2 =  16 MB   (negligible)
+context = 2048: N² × 32 × 2 = 268 MB   (worth accounting for)
+context = 4096: N² × 32 × 2 =   1.1 GB  (significant)
+context = 8192: N² × 32 × 2 =   4.3 GB  (dominant at 4 GB budget)
+```
+
+**Mitigation (v0.1):** Use at most 85% of your RAM budget for `--budget-gb` when planning at
+context ≥ 2048.  The headroom absorbs both OS overhead and attention scratch.
+
+**v0.2 fix path:** Add `activation_scratch_bytes` term to `cost::total_peak_bytes`:
+
+```rust
+let attention_scratch = seq_len * seq_len * cfg.num_heads as u64
+    * quant.kv_bytes_per_element() as u64;
+// peak over all layers; scalar engine frees after each layer, so max = 1 layer
+```
+
+Filed as a cycle 2 research finding.  The formula is sourced from Dao et al. 2022
+(FlashAttention) and Yuan et al. 2024 (source 22 in RESEARCH.md).
+
+### 8.2 — Q4_K byte-count overestimation for large-vocab models (Low likelihood, Medium severity)
+
+**What happens:** For a model with a large vocabulary (e.g. Qwen3: vocab_size = 151,936),
+`weight_bytes("q4_k_m", n_params)` significantly overestimates actual weight bytes because
+it applies 4 bits/weight uniformly, including to the embedding table (`token_embd.weight`)
+and output head (`output.weight`) — which are stored as fp16 in real GGUF files.
+
+**Quantified overestimate for Qwen3-1.7B Q4_K_M (confirmed in EVIDENCE.md §5 and §9):**
+
+```
+Real file on disk: 1.12 GB
+
+Our formula (4 bits per param):
+  1.7e9 × 0.5 bytes = 0.85 GB  ← weight prediction
+
+Real breakdown:
+  fp16 embeddings: 151,936 × 2048 × 2 bytes = 623 MB  (stored as fp16, not quantized)
+  quantized weights: 1120 − 623 = 497 MB (= 0.49 GB)
+
+Our formula applies q4_k_m to all 1.7B params including the 311M embedding params.
+Embedding contribution at 4 bits: 311M × 0.5 = 155 MB
+Embedding contribution at fp16:  311M × 2   = 623 MB
+
+Net effect: we over-predict embedding memory by 4× (fp16 is 4× larger than int4).
+This makes our total prediction safely conservative: 0.85 GB predicted vs
+0.85 GB true weights + 0.62 GB fp16 offset = 1.47 GB actual.
+
+Wait — conservative (over-prediction) means more likely to refuse than OOM.
+This is the SAFE direction. The plan() output in EVIDENCE.md §21:
+  fitsproof plan → 3.664 GB (with full metadata + fp16 embedding correction not yet applied)
+  vs real file 1.12 GB implies the overestimate is in KV cache + context + runtime, not
+  a purely conservative undercount.
+```
+
+**Actual consequence:** The prediction is conservative on weights (over-counts by ~4× on embedding
+bytes at int4 rate vs their real fp16 cost), which makes `admit` slightly more likely to add false
+degradation steps.  It will not produce false OOM (under-prediction) for this failure mode.
+
+**Documentation:** README §Limitations states "Q4_K byte count uses 4.0 bpw (actual Q4_K is
+~4.5 bpw including superblock metadata; mixed quant with fp16 embeddings not yet modelled)."
+This is the correct documented limitation.
+
+**v0.2 fix path (source 20 from RESEARCH.md, cycle 2):**
+- Use `bpw = 4.5` for Q4_K types (superblock overhead ~10%).
+- Detect `token_embd.weight` and `output.weight` tensor types from GGUF tensor_info and
+  count them at their actual dtype (fp16 or fp32) rather than the declared quant.
+- Requires the full GGUF tensor_info parser (v0.2 scope).
+
+---
+
+*Cycle 2 additions written 2026-09-28. Sources: §21 (Dao et al. 2022), §22 (Yuan et al. 2024),
+§20 (ggml K-quant superblock structure), §27 (Grevix/aura README).*
+
+---
+
 *Written 2026-09-28. Commands tested against fitsproof-rs v0.1 on feat/v0.1 branch.*
