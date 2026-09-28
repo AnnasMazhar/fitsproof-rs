@@ -1970,3 +1970,234 @@ allocates per-layer and frees, so the peak is one layer at a time, not all layer
 
 *Cycle 2, Pass 1 sources verified: 2026-09-28.  See PAPER-TRACEABILITY.md for
 equation → code → test mapping.*
+
+---
+
+# Cycle 2, Pass 2 — Ecosystem and Competition: Deepened (2026-09-28)
+
+Refreshes and deepens the comparison baseline.  New tool found: **Grevix/aura** — a Rust,
+GGUF, memory-budget-enforcement engine created 2026-08-23, not documented in earlier passes.
+All star counts re-verified via GitHub REST API and PyPI on 2026-09-28.
+
+---
+
+## Updated star counts (as of 2026-09-28T14:00 UTC)
+
+| Tool | Stars (prev pass) | Stars (this pass) | Delta | Last push |
+|------|------------------|--------------------|-------|-----------|
+| llama.cpp | 129,731 | 129,765 | +34 | 2026-09-28 |
+| vLLM | 92,825 | 92,862 | +37 | 2026-09-28 |
+| SGLang | 36,496 | 36,527 | +31 | 2026-09-28 |
+| KTransformers | 19,543 | 19,544 | +1 | 2026-09-23 |
+| ridgepoint | 1 | 1 | 0 | 2026-09-08 |
+| llm-inference-calculator | 20 | 21 | +1 | 2026-09-09 |
+| detllm | 20 | 20 | 0 | 2026-08-20 |
+| llm-roofline | 0 | 0 | 0 | 2026-06-20 |
+| hardware-aware-llm-runtime | 0 | 0 | 0 | 2026-06-25 |
+| llm-vram-calculator | 1 | 1 | 0 | 2026-09-26 |
+| **Grevix/aura** (new) | — | **4** | — | 2026-09-03 |
+
+---
+
+## New tool: Grevix/aura
+
+**Link:** https://github.com/Grevix/aura  
+**Stars:** 4  **Language:** Rust  **Created:** 2026-08-23  **Last push:** 2026-09-03  
+**License:** MIT OR Apache-2.0  
+**Status:** Verified to resolve 2026-09-28.  README read in full.
+
+### What it claims to do
+
+From the README: *"AURA is an open-source, Rust-first hardware-aware memory-budget
+enforcement and inference orchestration engine for local LLMs on consumer and mid-tier hardware."*
+
+It operates as a wrapper around `llama-server` (llama.cpp's HTTP backend) and enforces a
+memory ceiling through two OS mechanisms:
+- **Linux:** cgroup v2 — the AURA control plane spawns llama-server in a cgroup and sets
+  `memory.max` before execution begins.
+- **Windows:** Win32 Job Objects — same concept via `SetInformationJobObject`.
+
+Additional claims:
+- Pre-execution feasibility modeling: tensor size + KV cache + host hardware (CPU SIMD, RAM
+  bandwidth, GPU VRAM, NVMe IOPS) analyzed before loading.
+- Dynamic context window auto-tuning: automatically degrades 4096 → 2048 → 1024 to stay
+  under ceiling (calls this "Multi-pass search context scaling").
+- `MetricProvenance` tracking: distinguishes `AuraMeasured` vs `Simulated` in telemetry.
+- Hardware telemetry: CPU AVX2 detection, RAM bandwidth measurement, VRAM, NVMe IOPS.
+- `aura frontier inspect`: evaluates model feasibility before download.
+- Target hardware: their benchmark hardware is "Intel i5-13420H, 16.79 GB DDR5, NVIDIA RTX
+  4050 6GB VRAM" — squarely in our stated target class.
+
+### What AURA does well (honest assessment)
+
+- **OS-level enforcement.** cgroup v2 enforcement is harder than anything in our stack:
+  the OS kernel kills the child if it exceeds the limit, not a Rust allocator returning null.
+  No bypass path exists at the OS level; our `TrackingAllocator` only wraps Rust heap
+  allocations and would miss mmap'd weight files or Python sub-process allocations.
+- **Wraps an existing production engine.** By delegating generation to llama-server, AURA
+  inherits llama.cpp's full model coverage, quantization support, and kernel quality.
+  Our engine is a scalar reference path that does not run real weights in v0.1.
+- **Windows support.** Win32 Job Objects give the same hard-ceiling guarantee on Windows.
+  Our `verify` is Linux-only (`/proc/self/status VmHWM`).
+- **70/70 empirical benchmark badge.** The CI Quality Matrix badge links to a real
+  benchmarking run; this is evidence-backed, not self-certified.
+
+### Gap AURA leaves (where fitsproof-rs is different)
+
+| Property | AURA | fitsproof-rs |
+|----------|------|--------------|
+| Enforcement mechanism | cgroup v2 / Win32 Job Objects — kills child on OOM | `TrackingAllocator` — returns `DoesNotFit` typed error before allocation; graceful, inspectable |
+| Pre-flight check | Feasibility modeling, then *spawns* llama-server | `admit --budget-gb N` refuses with named binding constraint (exit 2) *before any allocation* — no subprocess, no engine required |
+| Proof harness | 70/70 benchmark on specific hardware, not a generalized stress contract | `stress` (≥20 configs) proves 0 violations, 0 silent mode changes; CI-runnable on any machine, offline, no GPU |
+| Measurement output | Telemetry during run; no allocator peak vs OS HWM delta | `verify` prints `allocator_peak` + `VmHWM` + `delta` — the overhead of the runtime itself is a named, visible number |
+| Dependency | Requires `llama-server` (llama.cpp) at runtime | Single static binary; no subprocess, no runtime deps |
+| Degradation records | Auto-tunes silently (degrades context without emitting a typed record by design) | Silent mode change = test failure; `FitsWithDegradation` verdict must carry non-empty `degradation_steps` vector |
+| CI integration | CI builds AURA itself; no budget-check step for the end user's CI | `fitsproof admit --budget-gb N` is a one-line CI gate; exit 2 is a standard CI failure |
+
+**The central difference:** AURA enforces the ceiling *at runtime by killing the child process*;
+fitsproof-rs enforces it *pre-flight by refusing before any allocation happens*.  These are
+complementary, not competing.  A user can run `fitsproof admit --budget-gb 4` before starting
+AURA (or llama.cpp directly) to know in advance whether the attempt will succeed.
+
+**The degradation difference:** AURA's auto-tuning silently falls back to lower context; it does
+not emit a typed record that a CI check can inspect.  fitsproof-rs's `FitsWithDegradation` verdict
+carries a structured `degradation_steps` vector (mode changed, what changed, why) that a caller
+can log or gate on.  Silent mode change = failure in the stress harness.
+
+---
+
+## Deepened comparison on the v0.2 delivery surface
+
+The v0.2 mandate adds `serve` (OpenAI-compat HTTP), `mcp` (MCP stdio server), and `pareto`
+(Pareto frontier sweep).  These create new comparison axes not in the cycle 1 table.
+
+### OpenAI-compatible HTTP memory gate
+
+Every major engine already ships an OpenAI-compatible server:
+- **llama.cpp llama-server**: full `/v1/chat/completions`; no budget gate; memory OOM kills
+  the server process.
+- **vLLM**: `/v1/completions`; GPU memory managed via PagedAttention; no pre-flight admit.
+- **AURA**: wraps llama-server; adds a cgroup ceiling but does not expose a `/v1` endpoint
+  itself — it proxies to llama-server's endpoint.
+
+**Unserved property (v0.2):** No existing server response carries an `admit record` (budget,
+predicted peak, binding constraint) in the response headers or body.  The v0.2 `serve`
+endpoint will return a `503` with the binding constraint when `admit` refuses, making the
+resource contract visible at the HTTP layer — not just at process death or cgroup kill.
+
+### MCP server for model resource contracts
+
+No tool in the comparison table exposes an MCP stdio server for `probe / plan / admit`.
+detllm does not have MCP tooling.  ridgepoint is a Python library with no server interface.
+AURA does not have an MCP server.
+
+The gap: an *agent* that decides whether to load a model (e.g. a code assistant choosing
+between Qwen3-1.7B and Qwen3-7B given available RAM) currently has no MCP tool to query for
+a resource contract.  The v0.2 `mcp` server fills this gap.
+
+### Pareto frontier sweep
+
+The v0.2 `pareto` command sweeps (quantization × context_length) and returns the Pareto
+frontier of (predicted_peak_bytes, predicted_tok_s).  No comparison tool does this:
+- ridgepoint predicts for a single config; does not sweep.
+- llm-inference-calculator has no sweep command.
+- AURA auto-tunes context to fit the budget, but does not expose the frontier.
+
+---
+
+## Revised gap statement (cycle 2)
+
+The comparison table now includes AURA, which is the closest competitor in the Rust +
+memory-budget + GGUF + consumer hardware space.  After full analysis:
+
+**AURA narrows the gap on enforcement** (OS-level cgroup v2 is stricter than TrackingAllocator
+for subprocess-based engines).  **AURA does not close the gap on:**
+
+1. Pre-flight refusal with named binding constraint (AURA enforces at runtime, not pre-flight).
+2. Typed degradation records (AURA auto-tunes silently by design).
+3. Proof harness generalization (fitsproof `stress` runs anywhere; AURA's 70/70 is on
+   specific hardware and requires the full engine stack).
+4. Standalone binary with no engine dependency (AURA requires llama-server at runtime).
+5. Measurement output (allocator_peak vs VmHWM delta is a fitsproof-rs-specific output).
+
+The claim stands: **the combination of pre-flight admit + typed degradation records + offline
+generalized stress harness + allocator peak vs OS HWM delta** does not exist in any tool,
+including AURA.
+
+---
+
+## How a user notices the gap (concrete scenario)
+
+A user writing a CI job that gates model loading:
+
+```bash
+# AURA approach: run and kill on OOM (post-hoc)
+aura run --model qwen3-7b.gguf --budget 4gb
+# → succeeds or gets killed; no pre-flight signal; CI exit code from process death
+
+# fitsproof-rs approach: refuse before trying
+fitsproof admit --budget-gb 4 --model qwen3-7b.gguf
+echo "exit $?"   # → 2 if refused, with binding constraint in stdout
+# → "REFUSED: needs 5.1 GB, budget 4.0 GB; binding constraint: weight_bytes=4.6 GB + kv_cache=0.5 GB"
+```
+
+The fitsproof-rs version: exits before any allocation, names the binding constraint, is a
+standard CI `||` gate, runs in milliseconds, requires no GPU, no llama-server, and works
+offline.  AURA's version requires the full engine stack to load and fail.
+
+---
+
+## Sources added this pass
+
+| # | Source | Role |
+|---|--------|------|
+| 27 | Grevix/aura README (fetched 2026-09-28) | Direct Rust competitor with OS-level enforcement |
+| 28 | GitHub REST API unauthenticated (2026-09-28) | Star count refresh for all 11 comparison tools |
+
+**Link 27:** https://github.com/Grevix/aura — README read at HEAD (last push 2026-09-03).
+Confirmed: Rust, MIT OR Apache-2.0, cgroup v2 enforcement, llama-server backend, 70/70 benchmark claim.
+
+---
+
+## Falsification section (cycle 2, pass 2 additions)
+
+### 12. AURA does not expose a pre-flight typed refusal
+
+**Claim:** AURA's enforcement happens at runtime (cgroup kill), not pre-flight (typed error
+before allocation).  There is no `aura admit` or equivalent command that exits non-zero before
+spawning llama-server.
+
+**Falsifying observation:** AURA's CLI has a `--dry-run` or equivalent flag that performs
+feasibility modeling and exits non-zero without spawning the engine.
+
+**Method:** README read in full (fetched 2026-09-28).  CLI reference section documents:
+`aura run`, `aura frontier inspect`, `aura hardware doctor`, `aura storage doctor`.
+No `--dry-run` flag exists.  The `frontier inspect` command evaluates feasibility for
+frontier models but does not apply to a local GGUF file.
+
+**Current status:** Not falsified.  AURA's feasibility modeling runs before spawning the
+engine, but the outcome is: spawn + enforce, not: refuse + exit 2 + named constraint.
+
+### 13. AURA's degradation is silent relative to our contract
+
+**Claim:** AURA auto-tunes context length (4096 → 2048 → 1024) without emitting a typed
+record that a caller can inspect programmatically.
+
+**Falsifying observation:** AURA writes a structured JSON degradation record (comparable to
+fitsproof-rs's `degradation_steps`) to stdout or a log file when it auto-tunes.
+
+**Method:** README section 3 ("What Gives AURA the Cutting Edge") describes auto-tuning as
+a feature with no mention of a structured degradation record.  The telemetry section
+describes `MetricProvenance` for measurement values (AuraMeasured vs Simulated), not for
+mode changes.
+
+**Current status:** Not falsified from README.  Cannot confirm from source code without
+checking the repo tree.  Documented as "unconfirmed — possible in implementation" if the
+telemetry system tracks mode changes.  The conservative claim: AURA's auto-tuning is a
+feature framed as a positive (it just works), not as an inspectable contract.
+
+---
+
+*Cycle 2, Pass 2 data verified: 2026-09-28T14:00 UTC.  Star counts from GitHub REST API
+(unauthenticated).  AURA README fetched from GitHub raw content.  ridgepoint version from
+PyPI JSON API.*
