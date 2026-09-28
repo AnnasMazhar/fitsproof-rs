@@ -1,5 +1,149 @@
 # Improvement Log — fitsproof-rs
 
+## c2-p08-improve-1 (cycle 2, pass 8) — 2026-09-28
+
+### Findings fixed
+
+Both open findings from the cycle 1 adversarial review (ADV-1 and ADV-2) are addressed in this
+pass. ADV-1 is the primary fix; ADV-2 is the test-quality hardening.
+
+---
+
+### ADV-1 — Binding constraint omits component breakdown
+
+**Severity:** Minor (adversarial review c1-p10/p11 rating)
+
+**Root cause:** `src/plan.rs:plan()` formatted the binding constraint string as:
+```
+needs 0.055 GB, budget 0.001 GB; no degradation fits
+```
+The README claim is "exit 2 on refusal, **binding constraint named**". "Named" implies the user
+can determine *why* the config does not fit — which component (weight, kv, activation) is the
+bottleneck. The old message told you the total, not the breakdown. A user with a 4 GB budget
+refusing a 5 GB model could not tell from the message whether the problem is 4.8 GB of weights
+(fix: lower quant) or 200 MB of KV cache blowing up (fix: shorter context).
+
+**Fix applied:**
+
+`src/plan.rs` — `plan()` DoesNotFit branch now calls `cost_est.weight_bytes`, `.kv_cache_bytes`,
+and `.activation_bytes` (already computed) to include a per-component breakdown:
+
+```
+needs 0.055 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.001 GB; no degradation fits
+```
+
+Raw terminal verification:
+```
+$ ./target/debug/fitsproof admit --budget-gb 0.001
+REFUSED: needs 0.055 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.001 GB; no degradation fits
+$ echo $?
+2
+```
+
+**Test added:**
+
+`src/plan.rs::tests::binding_constraint_includes_component_breakdown`
+
+Fault detected: binding_constraint omits "weight=", "kv=", or "activation=" fields.
+
+Inject the fault: remove any of the three `{component}=…` expansions from the format string.
+The test asserts all three `contains("weight=")`, `contains("kv=")`, `contains("activation=")`.
+
+This test would have caught ADV-1 immediately: the original format string would fail all three assertions.
+
+---
+
+### ADV-2 — Boundary test weak: `!= DoesNotFit` misses `<= → <` fault
+
+**Severity:** Minor (test-quality hardening, not a production bug)
+
+**Root cause:** `tests/adversarial.rs::budget_exactly_at_predicted_peak_admits` asserted:
+```rust
+assert_ne!(p.verdict, Verdict::DoesNotFit, …);
+```
+
+The fault ADV-2 describes is: changing `<=` to `<` in plan.rs makes `budget == predicted_peak`
+fall through to `FitsWithDegradation` instead of `Fits`. The `!= DoesNotFit` assertion passes
+for *both* `Fits` and `FitsWithDegradation`, so the test does not catch the fault.
+
+**Fix applied:**
+
+`tests/adversarial.rs::budget_exactly_at_predicted_peak_admits` — assertion changed from:
+```rust
+assert_ne!(p.verdict, Verdict::DoesNotFit, …)
+```
+to:
+```rust
+assert_eq!(p.verdict, Verdict::Fits, …)
+```
+
+The updated doc comment explains the specific fault it now catches.
+
+**Fault injection verification:**
+
+Inject the fault: change `predicted_peak <= budget_bytes` to `predicted_peak < budget_bytes`
+in `src/plan.rs`. With the old test the suite passes (FitsWithDegradation != DoesNotFit).
+With the new test:
+```
+assertion `left == right` failed: plan with budget == predicted peak must return Verdict::Fits …
+  left:  FitsWithDegradation
+  right: Fits
+```
+
+### Before/after metrics
+
+| Metric | Before (c2-p07 eval) | After (c2-p08-improve-1) | Delta |
+|--------|---------------------|--------------------------|-------|
+| Tests run | 187 | 188 | +1 (new `binding_constraint_includes_component_breakdown`) |
+| Test failures | 0 | 0 | 0 |
+| ADV-1 status | open | **fixed** | resolved |
+| ADV-2 status | open | **fixed** | resolved |
+| Refusal message itemizes components | No (total only) | Yes (weight/kv/activation) | +UX diagnostic |
+| Boundary fault coverage (`<= vs <`) | Not caught by `!= DoesNotFit` | Caught by `== Fits` | +1 fault covered |
+| `cargo clippy -D warnings` | PASS | PASS | — |
+| `cargo fmt --check` | PASS | PASS | — |
+| Open adversarial findings (minor) | 2 | **0** | −2 |
+
+### Raw terminal output
+
+```
+$ ~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]"
+running 125 tests
+test result: ok. 125 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 51.03s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 28 tests
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+running 23 tests
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 70.39s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+```
+$ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings 2>&1
+    Checking fitsproof-rs v0.1.0 (...)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.98s
+(exit 0 — clean)
+```
+
+```
+$ ./target/debug/fitsproof admit --budget-gb 0.001
+REFUSED: needs 0.055 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.001 GB; no degradation fits
+$ echo $?
+2
+```
+
+---
+
+
+
 ## c1-p08-improve-1 (cycle 1, pass 8) — 2026-09-28
 
 ### Finding fixed

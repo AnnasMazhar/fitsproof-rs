@@ -193,9 +193,19 @@ pub fn plan(
             binding_constraint: String::new(),
         })
     } else {
+        // Include component breakdown so the user can see which term is binding.
+        // This satisfies ADV-1: "binding constraint named" means the component breakdown
+        // is visible, not just the total.
+        let w = cost_est.weight_bytes;
+        let kv = cost_est.kv_cache_bytes;
+        let act = cost_est.activation_bytes;
         let binding = format!(
-            "needs {:.2} GB, budget {:.2} GB; no degradation fits",
+            "needs {:.3} GB (weight={:.3} GB, kv={:.3} GB, activation={:.3} GB), \
+             budget {:.3} GB; no degradation fits",
             predicted_peak as f64 / 1e9,
+            w as f64 / 1e9,
+            kv as f64 / 1e9,
+            act as f64 / 1e9,
             budget_bytes as f64 / 1e9,
         );
         Ok(Plan {
@@ -325,6 +335,36 @@ mod tests {
         assert!(
             matches!(result, Err(PlanError::InvalidBudget(_))),
             "budget=0 must return PlanError::InvalidBudget"
+        );
+    }
+
+    /// Fault detected: binding_constraint omits component breakdown (weight/kv/activation),
+    /// leaving the user without diagnostic info about which component is the bottleneck.
+    ///
+    /// This is the test that would have caught ADV-1: if the binding constraint string
+    /// does not contain "weight=", "kv=", and "activation=", the user cannot determine
+    /// which component is dominant without re-running cost::estimate manually.
+    #[test]
+    fn binding_constraint_includes_component_breakdown() {
+        let cfg = ModelConfig::reference();
+        let m = ref_machine();
+        // 1-byte budget forces DoesNotFit.
+        let p = plan(&cfg, &m, 512, 1, "none", 0.6).unwrap();
+        assert_eq!(p.verdict, Verdict::DoesNotFit);
+        assert!(
+            p.binding_constraint.contains("weight="),
+            "binding_constraint must include 'weight=' component: got {:?}",
+            p.binding_constraint
+        );
+        assert!(
+            p.binding_constraint.contains("kv="),
+            "binding_constraint must include 'kv=' component: got {:?}",
+            p.binding_constraint
+        );
+        assert!(
+            p.binding_constraint.contains("activation="),
+            "binding_constraint must include 'activation=' component: got {:?}",
+            p.binding_constraint
         );
     }
 

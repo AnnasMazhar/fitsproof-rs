@@ -11,7 +11,7 @@
 //! | `budget_zero_returns_invalid_budget_error` | A budget of 0 bytes must return PlanError::InvalidBudget, never silently produce DoesNotFit or Fits. |
 //! | `unknown_quant_returns_unknown_quant_error` | An unrecognised quant string must return PlanError::UnknownQuant, never fall through to fp32 silently. |
 //! | `context_len_zero_returns_invalid_context_error` | context_len=0 must return PlanError::InvalidContextLen. |
-//! | `budget_exactly_at_predicted_peak_admits` | Budget == predicted peak must not return DoesNotFit (rounding error with > vs >= causes incorrect refusal). |
+//! | `budget_exactly_at_predicted_peak_admits` | Budget == predicted peak must return Verdict::Fits (not FitsWithDegradation). Changing `<=` to `<` in plan.rs produces FitsWithDegradation — `!= DoesNotFit` misses this; `== Fits` catches it. |
 //! | `budget_one_byte_below_peak_not_fits` | Budget strictly below predicted peak must not return Verdict::Fits. |
 //! | `integer_overflow_context_len` | context_len near u32::MAX must not overflow or wrap to a small value in kv_cache_bytes. |
 //! | `large_vocab_weight_bytes_not_zero` | A vocab of 1M must produce weight_bytes ≥ 256 MB, not overflow to 0. |
@@ -116,6 +116,8 @@ fn context_len_zero_returns_invalid_context_error() {
 // ── Budget boundary faults ───────────────────────────────────────────────────
 
 /// Fault: rounding error (> vs >=) causes DoesNotFit when budget exactly equals predicted peak.
+/// Also catches the <= vs < fault: if `<=` is changed to `<`, the verdict falls through to
+/// FitsWithDegradation instead of Fits — which `!= DoesNotFit` would pass but `== Fits` catches.
 #[test]
 fn budget_exactly_at_predicted_peak_admits() {
     let model = small_model();
@@ -123,10 +125,12 @@ fn budget_exactly_at_predicted_peak_admits() {
     let peak = cost::estimate(&model, &machine, 128, "fp32", 1.0).total_peak_bytes;
     let result = plan(&model, &machine, 128, peak, "fp32", 1.0);
     let p = result.expect("plan must succeed with valid inputs");
-    assert_ne!(
+    assert_eq!(
         p.verdict,
-        Verdict::DoesNotFit,
-        "plan with budget == predicted peak must not return DoesNotFit; got {:?}",
+        Verdict::Fits,
+        "plan with budget == predicted peak must return Verdict::Fits (not FitsWithDegradation \
+         or DoesNotFit); got {:?}. Changing <= to < in plan.rs would produce FitsWithDegradation \
+         here — that is the fault this test detects.",
         p.verdict
     );
 }
