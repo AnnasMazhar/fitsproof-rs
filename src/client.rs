@@ -15,7 +15,7 @@
 //! ```rust
 //! use fitsproof::client::{FitsproofClient, GuardError};
 //!
-//! fn load_model(budget_gb: f64) -> Result<(), GuardError> {
+//! fn load_model(budget_gb: f64) -> Result<(), Box<GuardError>> {
 //!     let client = FitsproofClient::new(budget_gb);
 //!     client.guard()?; // raises before any allocation if the config won't fit
 //!     // ... actual model loading happens here ...

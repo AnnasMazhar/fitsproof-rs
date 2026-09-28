@@ -8,7 +8,7 @@
 //! # Integration
 //!
 //! Swap `base_url` in any OpenAI client:
-//! ```
+//! ```bash
 //! OPENAI_BASE_URL=http://localhost:8080/v1
 //! ```
 //!
