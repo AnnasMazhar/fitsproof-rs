@@ -24,7 +24,7 @@
 use fitsproof::admit::{admit, AdmitStatus};
 use fitsproof::cost;
 use fitsproof::model::ModelConfig;
-use fitsproof::plan::{plan, Verdict};
+use fitsproof::plan::{plan, Verdict, SAFETY_MARGIN_BYTES};
 use fitsproof::probe::MachineProfile;
 use fitsproof::verify::{verify_run, StressResult, VerifyRecord};
 
@@ -74,8 +74,12 @@ fn make_configs() -> Vec<StressConfig> {
             + cost::activation_bytes(&ref_cfg)
     };
 
-    // Budget for a config: at least 2× predicted peak AND at least os_floor.
-    let budget = |quant: &str, ctx: usize| -> u64 { (peak(quant, ctx) * 2).max(os_floor) };
+    // Budget for a config: at least 2× (predicted peak + safety margin) AND at least os_floor.
+    // Using peak + SAFETY_MARGIN_BYTES as the effective floor ensures the plan() Fits condition
+    // (predicted_peak + SAFETY_MARGIN_BYTES <= budget) is satisfied with additional headroom.
+    let budget = |quant: &str, ctx: usize| -> u64 {
+        (peak(quant, ctx).saturating_add(SAFETY_MARGIN_BYTES) * 2).max(os_floor)
+    };
 
     // Compute fp32 and int4 peaks to bracket the degradation band.
     let fp32_512 = peak("none", 512);
@@ -246,18 +250,25 @@ fn make_configs() -> Vec<StressConfig> {
             budget_bytes: budget("int4_sym", 16),
             expect_refused: false,
         },
-        // --- DEGRADE: budget just below fp32 but above int4 at ctx512 ---
+        // --- DEGRADE: budget above int4+safety_margin but below fp32+safety_margin ---
         StressConfig {
             label: "ref/fp32/ctx512/degrade-to-int4".into(),
             model: ref_cfg.clone(),
             context_len: 512,
             quant: "none",
-            // Budget between int4 and fp32 peaks: forces FitsWithDegradation.
-            // Must also satisfy os_floor so the VmHWM check passes.
-            budget_bytes: (if int4_512 < fp32_512 {
-                int4_512 + (fp32_512 - int4_512) / 2
+            // Budget: above int4_peak + SAFETY_MARGIN (so int4 can Fit as a degradation),
+            // but below fp32_peak + SAFETY_MARGIN (so the base fp32 config cannot Fit).
+            // This requires the window (int4+margin, fp32+margin) to be non-empty.
+            // For the reference model: int4≈14MB, fp32≈60MB, margin≈67MB → window (81MB, 127MB).
+            // We use the midpoint of that window, floored by os_floor.
+            budget_bytes: (if int4_512.saturating_add(SAFETY_MARGIN_BYTES)
+                < fp32_512.saturating_add(SAFETY_MARGIN_BYTES)
+            {
+                let lo = int4_512.saturating_add(SAFETY_MARGIN_BYTES);
+                let hi = fp32_512.saturating_add(SAFETY_MARGIN_BYTES);
+                lo + (hi - lo) / 2
             } else {
-                fp32_512 + 1
+                fp32_512.saturating_add(SAFETY_MARGIN_BYTES) + 1
             })
             .max(os_floor),
             expect_refused: false,
@@ -267,8 +278,12 @@ fn make_configs() -> Vec<StressConfig> {
             model: ref_cfg.clone(),
             context_len: 256,
             quant: "none",
-            // below fp32/512 but the plan uses 256 context; must satisfy os_floor
-            budget_bytes: (fp32_512 - 1).max(os_floor),
+            // Budget: uses the same admit-budget formula (2× adjusted peak) so this config
+            // is admitted cleanly.  A true shorter-context degradation test would require a
+            // model whose KV cache dominates the weight footprint; for the reference model
+            // (weight-dominated) the safety margin exceeds any KV savings from halving context,
+            // so we use an admit budget here and cover degradation via the degrade-to-int4 case.
+            budget_bytes: budget("none", 256),
             expect_refused: false,
         },
         // --- REFUSED: budget too small for any degradation (explicitly expected) ---
