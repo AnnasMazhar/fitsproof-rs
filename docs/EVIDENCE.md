@@ -777,3 +777,106 @@ CLEAN
 ```
 
 **Status:** PASS — no clippy warnings, no formatting diffs.
+
+---
+
+## 30. c2-p05-implement-2: ADV-3 race condition fixed — CAS loop in try_reserve()
+
+**Claim:** `src/allocator.rs` `try_reserve()` uses an atomic CAS loop: only the thread
+that wins the compare-exchange proceeds past the ceiling; the other sees the updated
+current and is refused. Two concurrent threads cannot both exceed the ceiling.
+
+**Command:**
+```
+~/.cargo/bin/cargo test --test adversarial race_condition_ceiling_closed -- --nocapture
+```
+
+**Raw output:**
+```
+running 1 test
+test race_condition_ceiling_closed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.01s
+```
+
+**Status:** PASS — 50 trials, Barrier-synchronised entry, pointers kept live. ADV-3 closed.
+
+---
+
+## 31. c2-p05-implement-2: adversarial suite expanded to 28 tests
+
+**Claim:** 5 FitsproofClient API attack tests added, plus the ADV-3 regression test replaced
+with a passing confirmation test. Total adversarial: 28.
+
+**Command:**
+```
+~/.cargo/bin/cargo test --test adversarial 2>&1 | grep "test result:"
+```
+
+**Raw output:**
+```
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+**Status:** PASS
+
+---
+
+## 32. c2-p05-implement-2: full test suite — 187 tests
+
+**Claim:** `cargo test --all-targets` is green with 187 tests after c2-p05.
+
+**Command:**
+```
+~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]"
+```
+
+**Raw output:**
+```
+running 124 tests
+test result: ok. 124 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.33s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 28 tests
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+running 23 tests
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.19s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Status:** PASS — 187 tests total (124 lib + 28 adversarial + 23 contract_mutants +
+1 real_model + 2 smoke + 3 stress + 6 value). +5 vs c2-p04 (182→187).
+
+---
+
+## 33. c2-p05-implement-2: clippy + fmt clean
+
+**Command:**
+```
+~/.cargo/bin/cargo clippy --all-targets -- -D warnings && ~/.cargo/bin/cargo fmt --check
+```
+
+**Raw output:**
+```
+    Checking fitsproof-rs v0.1.0 (...)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.52s
+(no fmt diff)
+```
+
+**Status:** PASS
+
+---
+
+## Open items / limitations (updated c2-p05)
+
+- Real-model generation (tokens, not just plan) requires full GGUF weight loader + tokenizer: **v0.2 scope**.
+- `serve` and `mcp` CLI commands: **not implemented in v0.1** (exit 2 with message).
+- CI static binary (musl): not tested locally (requires musl target); CI workflow is present.
+- ADV-3 (race condition in ceiling): **FIXED c2-p05** via CAS loop in `try_reserve()`.

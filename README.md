@@ -142,7 +142,7 @@ Key differences that justify the Rust port:
 
 ```
 src/
-  allocator.rs       TrackingAllocator (GlobalAlloc wrapper), DoesNotFit error
+  allocator.rs       TrackingAllocator (GlobalAlloc wrapper, atomic CAS ceiling), DoesNotFit error
   model.rs           ModelConfig (architecture parameters, reference bundle config)
   probe.rs           MachineProfile, STREAM-triad bandwidth + GEMM measurement
   cost.rs            Analytical roofline cost model (weight/KV/activation bytes, tok/s)
@@ -150,6 +150,10 @@ src/
   admit.rs           AdmitRecord, admit() — the enforcement point
   verify.rs          VerifyRecord, verify_run() — allocator_peak + VmHWM + delta
   gguf.rs            Minimal GGUF version 1, 2, 3 header reader → ModelConfig
+  client.rs          FitsproofClient, guard() — v0.2 Rust API surface
+  serve.rs           OpenAI-compatible HTTP server [v0.2]
+  mcp.rs             MCP stdio server [v0.2]
+  pareto.rs          Pareto frontier sweep [v0.2]
   engine/
     ops.rs           RMSNorm, RoPE, GQA attention, SwiGLU FFN, KV cache, linear
     quant.rs         int8_sym + int4_sym symmetric quantisation
@@ -159,7 +163,9 @@ src/
 tests/
   smoke.rs           Binary smoke tests (version, unknown command)
   stress.rs          25-config stress harness (acceptance criteria)
-  adversarial.rs     19 byzantine/edge-case tests (overflow, malformed input, boundary faults)
+  adversarial.rs     28 byzantine/edge-case tests (overflow, malformed input, boundary faults,
+                     race condition close, FitsproofClient API attacks)
+  contract_mutants.rs  23 mutation-killing tests targeting cost/plan/admit arithmetic
   real_model.rs      Real GGUF model test (plan against real weights)
   value/
     test_incumbent_gap.rs  The two mandatory zero-case proofs (refused + degraded)
@@ -225,8 +231,6 @@ These are honest. A repo with no stated limitations is not credible.
 - **KV cache bandwidth not in decode formula.** The decode formula counts weight streaming;
   KV cache access adds bandwidth at long contexts (known limitation, documented in the Python
   oracle too).
-- **Mutation score not yet measured.** Target ≥70% with `cargo-mutants` for cycle 2.
-  See `docs/EVIDENCE.md` open items.
 
 ## Licence
 

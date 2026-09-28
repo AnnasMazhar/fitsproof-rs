@@ -434,7 +434,7 @@ On non-Linux platforms, the function returns 0, which is documented behavior.
 |----|----------|---------|----------|--------|
 | ADV-1 | minor | Refusal message says "no degradation fits" but does not itemize binding constraint (weight vs KV vs activation) | `admit --budget-gb 0.001` output | open |
 | ADV-2 | minor | `budget_exactly_at_predicted_peak_admits` test does not catch `<=` to `<` boundary fault because degradation path still returns non-DoesNotFit | Fault injection test | open |
-| **ADV-3** | **major** | **Race condition in ceiling enforcement: concurrent allocations can bypass the budget check** | `race_condition_ceiling_check` test: "Max overshoot: 300 bytes" | **open** |
+| **ADV-3** | **major** | **Race condition in ceiling enforcement: concurrent allocations can bypass the budget check** | Fixed c2-p05: `try_reserve()` CAS loop; `race_condition_ceiling_closed` test passes 50 trials | **fixed** |
 | ADV-4 | info | allocator_peak shows 0.0 GB in verify output — correct for reference bundle but may confuse users | `verify --budget-gb 4` output | limitation |
 
 ---
@@ -443,62 +443,34 @@ On non-Linux platforms, the function returns 0, which is documented behavior.
 
 ### ADV-3 (major) — Race condition in ceiling enforcement
 
-**Status:** open
+**Status:** FIXED (c2-p05)
 
-**Evidence:**
+**Fix:** `src/allocator.rs` — `TrackingAllocator::alloc`, `alloc_zeroed`, and `realloc` now call
+`try_reserve()` which uses an atomic CAS loop. The check and increment happen atomically: only
+the thread that wins the CAS proceeds; the other sees the updated value and is refused.
+
 ```
-$ cargo test --test adversarial race_condition_ceiling_check -- --nocapture
-ADV-3 CONFIRMED: Race condition in ceiling enforcement. Max overshoot: 300 bytes
-test race_condition_ceiling_check ... ok
-```
-
-**Impact:** Under concurrent allocation pressure, the budget ceiling can be exceeded by up to
-the sum of racing allocation sizes minus the headroom. In the test: 500 prefill + 350 + 350 =
-1200 bytes vs 900 ceiling = 300 byte overshoot.
-
-**Recommended fix:** Use atomic compare-and-swap (CAS) loop to check-and-increment atomically:
-
-```rust
-// Pseudocode for fix:
-loop {
-    let current = self.current.load(Ordering::SeqCst);
-    let after = current.saturating_add(size as i64);
-    if after > ceil as i64 {
-        return std::ptr::null_mut();
-    }
-    if self.current.compare_exchange_weak(
-        current, after, Ordering::SeqCst, Ordering::Relaxed
-    ).is_ok() {
-        break;
-    }
-}
-let ptr = self.inner.alloc(layout);
-if ptr.is_null() {
-    // Rollback
-    self.current.fetch_sub(size as i64, Ordering::SeqCst);
-}
+$ cargo test --test adversarial race_condition_ceiling_closed -- --nocapture
+running 1 test
+test race_condition_ceiling_closed ... ok
 ```
 
-**Mitigation in place:** The stress harness runs single-threaded, so the 0-violation claim
-holds for single-threaded use. Multi-threaded callers are at risk.
-
-**Note:** This is a legitimate vulnerability but the contract's primary use case (CI/build-time
-admission checks) is single-threaded. The vulnerability is exploitable in multi-threaded
-inference engines that share the ceiling-enforced allocator.
+50 trials, 0 regressions. The Barrier synchronisation ensures both threads enter `alloc()`
+simultaneously, and pointers are kept live until both threads finish so dealloc cannot create
+a false window.
 
 ---
 
 ## Pass 2 Summary
 
 - **Attacks attempted:** 6
-- **Attacks successful:** 1 (race condition in ceiling enforcement)
+- **Attacks successful:** 1 (race condition in ceiling enforcement — now fixed)
 - **Attacks failed:** 5 (design limitation, not exploitable, defensive code works)
-- **New findings:** 1 major (ADV-3)
-- **Open blockers:** 0 (ADV-3 is major but not a blocker — single-threaded use is safe)
+- **New findings:** 1 major (ADV-3) — resolved
+- **Open blockers:** 0
 
-The core safety property **holds for single-threaded use** but has a **race condition under
-concurrent allocation**. This should be fixed in an improve pass before any multi-threaded
-deployment.
+The core safety property now holds under concurrent allocation. The CAS fix closes the window
+that previously allowed two threads to collectively exceed the ceiling.
 
 ---
 
@@ -507,13 +479,12 @@ deployment.
 - **Claims audit (Pass 1):** 3/3 claims verified.
 - **Citation audit (Pass 1):** 7/7 links resolve and support claims.
 - **Fault injection (Pass 1):** 5/5 faults detected.
-- **Property attacks (Pass 2):** 1/6 successful (race condition).
-- **Total open findings:** 3 (1 major, 2 minor).
+- **Property attacks (Pass 2):** 1/6 successful (race condition — fixed c2-p05).
+- **Total open findings:** 2 (0 major, 2 minor).
 - **Blockers:** 0.
 
-The repository meets the acceptance criteria for adversarial review. The major finding (ADV-3)
-should be prioritized for an improve pass.
+The repository meets the acceptance criteria for adversarial review.
 
 ---
 
-*Pass 2 completed: 2026-09-28 10:00 UTC.*
+*Pass 2 completed: 2026-09-28 10:00 UTC. ADV-3 fixed: 2026-09-28 (c2-p05).*

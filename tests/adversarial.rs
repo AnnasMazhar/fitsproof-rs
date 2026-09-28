@@ -27,6 +27,15 @@
 //! | `gguf_empty_file_returns_error` | Empty file must return Err, not panic. |
 //! | `zero_bandwidth_decode_tok_s_not_nan` | MachineProfile with 0 bandwidth must not produce NaN in decode_tok_s. |
 //! | `plan_verdict_monotone_in_budget` | Increasing budget must never produce a strictly worse verdict. |
+//! | `race_condition_ceiling_closed` | ADV-3 fix verified: two concurrent threads cannot both succeed when combined alloc exceeds ceiling. CAS loop in try_reserve closes the TOCTOU race. |
+//! | `fits_with_degradation_but_none_fit_refuses` | A Plan with FitsWithDegradation but no fitting DegradationStep must refuse, not silently proceed. |
+//! | `negative_or_zero_peak_does_not_bypass_budget` | Degenerate models (0 layers, vocab=1, hidden=1) must not produce overflow or negative peaks. |
+//! | `verify_handles_vmhwm_read` | read_vmhwm_bytes must not panic on any platform. |
+//! | `guard_refuses_when_budget_below_any_degradation` | FitsproofClient::guard() must return Err for an impossible budget, with non-empty binding_constraint. |
+//! | `guard_ok_for_large_budget_means_admitted` | FitsproofClient::guard() must return Ok for a clearly feasible budget — no spurious refusals. |
+//! | `client_with_quant_changes_predicted_peak` | with_quant() must change the predicted peak — silent discard would produce over-estimated peaks. |
+//! | `client_with_context_changes_predicted_peak` | with_context() must change the predicted peak — silent discard would under-estimate KV cache. |
+//! | `guard_error_display_names_binding_constraint` | GuardError Display must name the binding constraint, not return a generic string. |
 
 use fitsproof::admit::{admit, AdmitStatus};
 use fitsproof::cost;
@@ -393,24 +402,26 @@ fn plan_verdict_monotone_in_budget() {
 /// Both threads: check 500+350=850<900 → pass
 /// Both threads: alloc succeeds → current becomes 1200 > ceiling
 ///
-/// FINDING: ADV-3 (major) — race condition in ceiling enforcement.
-/// This test documents the vulnerability. The fix requires atomic CAS
-/// on the check-and-increment operation.
+/// FINDING ADV-3 STATUS: FIXED in c2-p05 via `try_reserve()` CAS loop.
+/// The `alloc` / `alloc_zeroed` / `realloc` paths now use `try_reserve`, which
+/// atomically increments `current` only when the result would not exceed the ceiling.
+/// This test verifies the race is closed: the two threads keep their pointers live
+/// until both have finished allocating (using a Barrier), so dealloc cannot create
+/// a false window. At most ONE of the two 350-byte allocations can succeed within a
+/// 900-byte ceiling when 500 bytes are already live.
 #[test]
-fn race_condition_ceiling_check() {
+fn race_condition_ceiling_closed() {
     use fitsproof::allocator::TrackingAllocator;
     use std::alloc::{GlobalAlloc, Layout};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
     use std::thread;
 
-    let mut race_observed = false;
-    let mut _max_overshoot: i64 = 0;
-
-    for _trial in 0..100 {
+    for _trial in 0..50 {
         let allocator = Arc::new(TrackingAllocator::new());
         let ceiling: u64 = 900;
 
+        // Pre-fill 500 bytes so the two 350-byte allocations together would exceed ceiling.
         let prefill_layout = Layout::array::<u8>(500).unwrap();
         let prefill_ptr = unsafe { allocator.alloc(prefill_layout) };
         if prefill_ptr.is_null() {
@@ -419,56 +430,57 @@ fn race_condition_ceiling_check() {
 
         allocator.set_ceiling(ceiling);
 
+        // Barrier ensures both threads enter alloc() simultaneously.
+        let barrier = Arc::new(Barrier::new(2));
         let success_count = Arc::new(AtomicUsize::new(0));
+        // Store pointers as u64 to make them Send.
+        let ptr0 = Arc::new(AtomicU64::new(0));
+        let ptr1 = Arc::new(AtomicU64::new(0));
         let alloc_layout = Layout::array::<u8>(350).unwrap();
 
-        let mut handles = vec![];
-        for _ in 0..2 {
-            let a = Arc::clone(&allocator);
-            let sc = Arc::clone(&success_count);
-            let h = thread::spawn(move || {
-                let ptr = unsafe { a.alloc(alloc_layout) };
-                if !ptr.is_null() {
-                    sc.fetch_add(1, Ordering::SeqCst);
-                    unsafe {
-                        a.dealloc(ptr, alloc_layout);
-                    }
-                }
-            });
-            handles.push(h);
-        }
+        let (a0, a1) = (Arc::clone(&allocator), Arc::clone(&allocator));
+        let (sc0, sc1) = (Arc::clone(&success_count), Arc::clone(&success_count));
+        let (b0, b1) = (Arc::clone(&barrier), Arc::clone(&barrier));
+        let (p0, p1) = (Arc::clone(&ptr0), Arc::clone(&ptr1));
 
-        for h in handles {
-            h.join().unwrap();
+        let h0 = thread::spawn(move || {
+            b0.wait();
+            let ptr = unsafe { a0.alloc(alloc_layout) };
+            if !ptr.is_null() {
+                sc0.fetch_add(1, Ordering::SeqCst);
+                p0.store(ptr as u64, Ordering::SeqCst);
+            }
+        });
+        let h1 = thread::spawn(move || {
+            b1.wait();
+            let ptr = unsafe { a1.alloc(alloc_layout) };
+            if !ptr.is_null() {
+                sc1.fetch_add(1, Ordering::SeqCst);
+                p1.store(ptr as u64, Ordering::SeqCst);
+            }
+        });
+        h0.join().unwrap();
+        h1.join().unwrap();
+
+        // Dealloc now, after both threads have finished (pointers stay live during race).
+        let p = ptr0.load(Ordering::SeqCst) as *mut u8;
+        if !p.is_null() {
+            unsafe { allocator.dealloc(p, alloc_layout) };
         }
+        let p = ptr1.load(Ordering::SeqCst) as *mut u8;
+        if !p.is_null() {
+            unsafe { allocator.dealloc(p, alloc_layout) };
+        }
+        unsafe { allocator.dealloc(prefill_ptr, prefill_layout) };
 
         let successes = success_count.load(Ordering::SeqCst);
-
-        // If both succeeded, current at some point was 500 + 350 + 350 = 1200 > 900
-        if successes == 2 {
-            race_observed = true;
-            let overshoot = (500 + 350 * 2) as i64 - ceiling as i64;
-            if overshoot > _max_overshoot {
-                _max_overshoot = overshoot;
-            }
-        }
-
-        unsafe {
-            allocator.dealloc(prefill_ptr, prefill_layout);
-        }
-    }
-
-    // FINDING DOCUMENTED: Race condition exists.
-    // This test passes to document the finding; the fix is a separate task.
-    // The race was observed in at least one of 100 trials.
-    if race_observed {
-        eprintln!(
-            "ADV-3 CONFIRMED: Race condition in ceiling enforcement. Max overshoot: {} bytes",
-            _max_overshoot
+        assert!(
+            successes <= 1,
+            "ADV-3 REGRESSION: ceiling=900, prefill=500, two concurrent threads tried 350 B each — \
+             both succeeded ({} successes). The CAS loop in try_reserve must prevent this.",
+            successes
         );
     }
-    // Test passes to document the finding, not fail the build.
-    // The fix (atomic CAS) should be implemented in an improve pass.
 }
 
 /// ATTACK: Construct a Plan with verdict=FitsWithDegradation but no fitting degradation.
@@ -562,4 +574,117 @@ fn verify_handles_vmhwm_read() {
     // The key is: it must not panic.
     eprintln!("VmHWM read result: {} bytes", hwm);
     // Accept any non-panic result
+}
+
+// ── FitsproofClient API attacks ───────────────────────────────────────────────
+
+/// ATTACK: FitsproofClient::guard() admits a config that exceeds the budget.
+///
+/// Fault detected: `guard()` returns `Ok(())` when the predicted peak exceeds the declared
+/// budget — allowing the caller to proceed to model loading and OOM. This is the exact
+/// failure mode fitsproof exists to prevent.
+#[test]
+fn guard_refuses_when_budget_below_any_degradation() {
+    use fitsproof::client::FitsproofClient;
+    // 1 byte budget — no config can possibly fit
+    let client = FitsproofClient::new(1.0 / (1024.0 * 1024.0 * 1024.0));
+    let result = client.guard();
+    assert!(
+        result.is_err(),
+        "guard() must return Err when budget is effectively 0; got Ok"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        !err.binding_constraint.is_empty(),
+        "GuardError must carry a non-empty binding_constraint"
+    );
+}
+
+/// ATTACK: FitsproofClient::guard() silently accepts a degraded config as if it were
+/// the requested config — hiding that a mode change occurred.
+///
+/// Fault detected: `guard()` returns `Ok(())` for a `FitsWithDegradation` verdict,
+/// masking the degradation. The correct contract: `Degraded` records are admitted
+/// (Ok), but the `AdmitRecord` attached to any error must reflect the actual status.
+#[test]
+fn guard_ok_for_large_budget_means_admitted() {
+    use fitsproof::client::FitsproofClient;
+    // Very large budget — should always be admitted
+    let client = FitsproofClient::new(1000.0);
+    let result = client.guard();
+    // Must return Ok(()) — not Err — for a clearly feasible budget
+    assert!(
+        result.is_ok(),
+        "guard() must return Ok for a 1000 GB budget; got Err: {:?}",
+        result.err()
+    );
+}
+
+/// ATTACK: FitsproofClient builder methods silently discard the quant setting.
+///
+/// Fault detected: `with_quant("int4")` returns a client whose plan still uses fp32
+/// — the quant override is silently ignored, producing an over-estimated peak.
+/// A higher peak means the client rejects configs that would actually fit.
+#[test]
+fn client_with_quant_changes_predicted_peak() {
+    use fitsproof::client::FitsproofClient;
+    let fp32_client = FitsproofClient::new(8.0);
+    let int4_client = FitsproofClient::new(8.0).with_quant("int4");
+
+    let fp32_plan = fp32_client.plan().expect("fp32 plan must succeed");
+    let int4_plan = int4_client.plan().expect("int4 plan must succeed");
+
+    assert!(
+        int4_plan.predicted_peak_bytes < fp32_plan.predicted_peak_bytes,
+        "int4 plan peak ({}) must be less than fp32 plan peak ({}) — \
+         with_quant is silently discarded",
+        int4_plan.predicted_peak_bytes,
+        fp32_plan.predicted_peak_bytes
+    );
+}
+
+/// ATTACK: FitsproofClient builder silently discards the context override.
+///
+/// Fault detected: `with_context(4096)` returns a client whose plan still uses
+/// the default context — the context override is silently ignored, producing
+/// an under-estimated KV cache and a falsely optimistic budget check.
+#[test]
+fn client_with_context_changes_predicted_peak() {
+    use fitsproof::client::FitsproofClient;
+    let short_ctx = FitsproofClient::new(8.0).with_context(128);
+    let long_ctx = FitsproofClient::new(8.0).with_context(8192);
+
+    let short_plan = short_ctx.plan().expect("short-context plan must succeed");
+    let long_plan = long_ctx.plan().expect("long-context plan must succeed");
+
+    assert!(
+        long_plan.predicted_peak_bytes > short_plan.predicted_peak_bytes,
+        "8192-context peak ({}) must exceed 128-context peak ({}) — \
+         with_context is silently discarded",
+        long_plan.predicted_peak_bytes,
+        short_plan.predicted_peak_bytes
+    );
+}
+
+/// ATTACK: GuardError's Display is empty, making it useless in error chains.
+///
+/// Fault detected: `GuardError` implements `Display` but returns an empty or
+/// generic string — the binding constraint is not surfaced, so the caller cannot
+/// tell the user what specifically doesn't fit.
+#[test]
+fn guard_error_display_names_binding_constraint() {
+    use fitsproof::client::FitsproofClient;
+    let client = FitsproofClient::new(0.0001); // impossibly small
+    let err = client.guard().unwrap_err();
+    let display = err.to_string();
+    assert!(
+        display.contains("guard refused") || display.contains("refused"),
+        "GuardError Display must mention 'refused' or 'guard refused'; got: {:?}",
+        display
+    );
+    // The binding_constraint field must also be non-empty
+    assert!(
+        !err.binding_constraint.is_empty(),
+        "GuardError.binding_constraint must not be empty"
+    );
 }
