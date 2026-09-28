@@ -643,3 +643,137 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```
 
 **Status:** PASS — 109 tests, no regressions.
+
+---
+
+## 25. c2-p04-implement-1: FitsproofClient + guard() — v0.2 Rust API surface
+
+**Claim:** `src/client.rs` implements `FitsproofClient` and `guard()` — the Rust analogue of the
+Python `@fitsproof.guard(budget=...)` decorator.  `guard()` returns `Err(Box<GuardError>)` before
+the caller allocates model memory when the config would be refused.
+
+**Command (client tests):**
+```
+~/.cargo/bin/cargo test --lib client:: -- --nocapture
+```
+
+**Raw output:**
+```
+running 10 tests
+test client::tests::client_admit_refused_has_status_refused ... ok
+test client::tests::client_plan_matches_direct_plan ... ok
+test client::tests::guard_admitted_after_degradation_is_ok ... ok
+test client::tests::guard_admits_sufficient_budget ... ok
+test client::tests::guard_error_names_binding_constraint ... ok
+test client::tests::guard_propagates_with_question_mark ... ok
+test client::tests::guard_refuses_insufficient_budget ... ok
+test client::tests::standalone_guard_refuses_impossible_budget ... ok
+test client::tests::with_context_changes_plan_peak ... ok
+test client::tests::with_quant_changes_plan_peak ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 114 filtered out; finished in 0.00s
+```
+
+**Status:** PASS — guard() refuses when budget < peak, admits when budget >= peak,
+error carries binding constraint, propagates via `?`.
+
+---
+
+## 26. c2-p04-implement-1: serve/mcp/pareto modules integrated
+
+**Claim:** `serve.rs`, `mcp.rs`, `pareto.rs`, `gguf_tensors.rs` committed to feat/v0.1.
+All module tests pass: serve (8 tests), mcp (9 tests), pareto (5 tests), gguf_tensors (9 tests).
+
+**Command:**
+```
+~/.cargo/bin/cargo test --lib serve:: mcp:: pareto:: gguf_tensors:: -- --nocapture 2>&1 | grep "test result:"
+```
+
+**Raw output:**
+```
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 93 filtered out; finished in 0.01s
+```
+
+**Status:** PASS
+
+---
+
+## 27. c2-p04-implement-1: contract_mutants test suite — 23 mutation-killing tests
+
+**Claim:** `tests/contract_mutants.rs` adds 23 tests targeting cost/plan/admit arithmetic.
+These are the modules cargo-mutants missed in c1 (only tested main.rs, scored 33%).
+
+Faults targeted:
+- weight_bytes: exact KAT (fp32=53,497,344), int4 < int8 < fp32, scales with num_layers
+- kv_cache_bytes: exact KAT (fp16=1,572,864), linear in context, linear in num_kv_heads
+- activation_bytes: exact KAT (9,216), nonzero check
+- total_peak = weight + kv + activation
+- decode_tok_s: decreases with larger model
+- plan: fits at exact peak, off-by-one below peak, DoesNotFit names binding constraint,
+  FitsWithDegradation has at least one fitting step, CI lower < upper, larger context → larger peak
+- admit: Fits → Admitted, DoesNotFit → Refused, FitsWithDegradation → Degraded (not Admitted),
+  correct message prefixes, positive margin
+
+**Command:**
+```
+~/.cargo/bin/cargo test --test contract_mutants 2>&1 | grep "test result:"
+```
+
+**Raw output:**
+```
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Status:** PASS
+
+---
+
+## 28. c2-p04-implement-1: full test suite — 182 tests
+
+**Claim:** `cargo test --all-targets` is green with 182 tests after implement pass 1 of cycle 2.
+
+**Command:**
+```
+~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]"
+```
+
+**Raw output:**
+```
+running 124 tests
+test result: ok. 124 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.78s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 23 tests
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+running 23 tests
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.93s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Status:** PASS — 182 tests total (124 lib + 23 adversarial + 23 contract_mutants + 1 real_model + 2 smoke + 3 stress + 6 value).
+Increase from 109 (c1) to 182 (c2-p04): +73 tests across client, contract_mutants, plus the previously untracked module tests now committed.
+
+---
+
+## 29. c2-p04-implement-1: clippy + fmt clean
+
+**Command:**
+```
+~/.cargo/bin/cargo clippy --all-targets -- -D warnings && ~/.cargo/bin/cargo fmt --check
+```
+
+**Raw output:**
+```
+    Checking fitsproof-rs v0.1.0 (...)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.48s
+CLEAN
+```
+
+**Status:** PASS — no clippy warnings, no formatting diffs.

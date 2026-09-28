@@ -16,12 +16,17 @@
 
 pub mod admit;
 pub mod allocator;
+pub mod client;
 pub mod cost;
 pub mod engine;
 pub mod gguf;
+pub mod gguf_tensors;
+pub mod mcp;
 pub mod model;
+pub mod pareto;
 pub mod plan;
 pub mod probe;
+pub mod serve;
 pub mod verify;
 
 // Install the tracking allocator as the global allocator.

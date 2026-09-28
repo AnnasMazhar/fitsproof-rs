@@ -24,9 +24,9 @@ COMMANDS:
     admit     Admit / degrade loudly / refuse (exit 2 on refusal, binding constraint named)
     verify    Measure peak allocator bytes + VmHWM, print delta, assert <= budget
     stress    >=20 configurations: zero violations, zero silent mode changes
-    serve     OpenAI-compatible HTTP server  [not yet implemented in v0.1]
-    mcp       MCP stdio server              [not yet implemented in v0.1]
-    pareto    Pareto frontier sweep         [not yet implemented in v0.1]
+    serve     OpenAI-compatible HTTP server  [--port 8080]
+    mcp       MCP stdio server (JSON-RPC 2.0 over stdin/stdout)
+    pareto    Pareto frontier sweep over (quant x context_len)
 
     --version  Print version
     --help     Print this message
@@ -39,6 +39,8 @@ EXAMPLES:
     fitsproof admit --model /path/to/model.gguf --budget-gb 4 --quant q4_k_m --context 4096
     fitsproof stress
     fitsproof verify --budget-gb 4
+    fitsproof serve --port 8080
+    fitsproof pareto --budget-gb 4
 ";
 
 fn main() -> ExitCode {
@@ -57,12 +59,9 @@ fn main() -> ExitCode {
         Some("admit") => cmd_admit(&args[1..]),
         Some("verify") => cmd_verify(&args[1..]),
         Some("stress") => cmd_stress(),
-        Some("serve" | "mcp" | "pareto") => {
-            let sub = args[0].as_str();
-            eprintln!("fitsproof: '{sub}' is not yet implemented in v0.1.");
-            eprintln!("See specs/fitsproof-rs.md for the delivery schedule.");
-            ExitCode::from(2)
-        }
+        Some("serve") => cmd_serve(&args[1..]),
+        Some("mcp") => cmd_mcp(),
+        Some("pareto") => cmd_pareto(&args[1..]),
         Some(other) => {
             eprintln!("fitsproof: unknown command '{other}'");
             eprintln!("Run 'fitsproof --help' for usage.");
@@ -257,6 +256,47 @@ fn cmd_verify(args: &[String]) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// serve
+// ---------------------------------------------------------------------------
+
+fn cmd_serve(args: &[String]) -> ExitCode {
+    let port: u16 = parse_flag(args, "--port")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8080);
+    let addr = format!("127.0.0.1:{port}");
+    match fitsproof::serve::run_server(&addr) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("fitsproof serve: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mcp
+// ---------------------------------------------------------------------------
+
+fn cmd_mcp() -> ExitCode {
+    fitsproof::mcp::run_stdio();
+    ExitCode::SUCCESS
+}
+
+// ---------------------------------------------------------------------------
+// pareto
+// ---------------------------------------------------------------------------
+
+fn cmd_pareto(args: &[String]) -> ExitCode {
+    let budget_gb = parse_budget_gb(args).unwrap_or(4.0);
+    let budget_bytes = (budget_gb * 1e9) as u64;
+    let cfg = ModelConfig::reference();
+    let machine = synthetic_machine_or_probe();
+    let result = fitsproof::pareto::pareto_sweep(&cfg, &machine, budget_bytes);
+    println!("{}", result.to_json());
+    ExitCode::SUCCESS
 }
 
 // ---------------------------------------------------------------------------

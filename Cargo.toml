@@ -29,6 +29,10 @@ path = "tests/value/test_incumbent_gap.rs"
 name = "adversarial"
 path = "tests/adversarial.rs"
 
+[[test]]
+name = "contract_mutants"
+path = "tests/contract_mutants.rs"
+
 [dev-dependencies]
 # Property-based testing (Hypothesis analogue for Rust).
 # Properties come from the method's assumptions, not the implementation.
