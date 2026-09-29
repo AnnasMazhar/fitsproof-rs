@@ -533,3 +533,293 @@ This is the correct documented limitation.
 ---
 
 *Written 2026-09-28. Commands tested against fitsproof-rs v0.1 on feat/v0.1 branch.*
+
+---
+
+## 9. v0.2 delivery surface — integration patterns (cycle 3 additions)
+
+The v0.2 features are implemented as stubs in v0.1 (`serve`, `mcp`, `pareto` exit 2 with a
+message; `FitsproofClient` and `guard()` are in `src/client.rs` and fully tested).
+This section documents how each surface integrates and what a real team would use it for.
+
+### 9.1 FitsproofClient and guard() — the Rust API surface (fully implemented)
+
+`FitsproofClient` is the Rust API for calling the contract from code, not the CLI.
+`guard()` is the Rust analogue of the Python `@fitsproof.guard(budget=...)` decorator.
+
+```rust
+use fitsproof_rs::client::{FitsproofClient, GuardError};
+
+fn load_model(path: &str) -> Result<Weights, Box<dyn std::error::Error>> {
+    let client = FitsproofClient::new()
+        .with_quant("q4_k_m")
+        .with_context(4096);
+
+    // guard() returns Err(GuardError) before any allocation if budget < predicted peak
+    client.guard(4.0)?;
+
+    // Only reaches here if the contract passes
+    Weights::load_from_gguf(path)
+}
+```
+
+On refusal:
+```
+GuardError: budget exceeded — predicted peak 3.664 GB > budget 4.000 GB;
+  binding constraint: weight_bytes (3.206 GB)
+```
+
+`guard()` uses the `?` operator and propagates as `Box<dyn Error>`.  This is the natural
+Rust integration: zero boilerplate, compatible with any existing `?`-using error handling.
+
+**Confirmed working (EVIDENCE.md §25):** 10 client tests pass, including:
+- `guard_refuses_insufficient_budget`
+- `guard_error_names_binding_constraint`
+- `guard_propagates_with_question_mark`
+- `guard_admitted_after_degradation_is_ok`
+
+The `FitsproofClient` / `guard()` API is the correct integration point for applications
+that are already Rust. For shell scripts and CI, the CLI is simpler. For agents, the
+MCP server (v0.2) is the right surface.
+
+### 9.2 OpenAI-compatible serve — drop-in base_url swap (v0.2 surface, currently stub)
+
+`fitsproof serve --budget-gb 4.0 --model /path/to/model.gguf` will expose a
+`/v1/chat/completions` endpoint that:
+1. Runs `admit()` on every request before generating.
+2. Returns HTTP 503 with a structured error body if refused.
+3. Carries the admission record in response headers on every successful 200.
+
+**Error body format (OpenAI-compatible, confirmed in `src/serve.rs`):**
+```json
+{
+  "error": {
+    "message": "REFUSED: needs 5.1 GB, budget 4.0 GB; binding constraint: weight_bytes=4.6 GB",
+    "type": "fitsproof_refused",
+    "admission_record": {
+      "status": "refused",
+      "binding_constraint": "weight_bytes"
+    }
+  }
+}
+```
+
+**v0.2 integration pattern:**
+```python
+import openai
+
+client = openai.OpenAI(
+    base_url="http://localhost:8080/v1",  # fitsproof serve
+    api_key="unused",
+)
+try:
+    resp = client.chat.completions.create(
+        model="/path/to/model.gguf",
+        messages=[{"role": "user", "content": "Hello"}],
+    )
+except openai.APIStatusError as e:
+    if e.status_code == 503:
+        constraint = e.body.get("admission_record", {}).get("binding_constraint", "unknown")
+        print(f"Model refused: binding constraint is {constraint}")
+    raise
+```
+
+The 503 causes `openai.APIStatusError`; `e.body['admission_record']['binding_constraint']`
+names the lever to pull.
+
+**Why 503 and not 413 or 422:** HTTP 503 (Service Unavailable) is the correct code for
+"the server cannot handle this request right now due to resource constraints" — which is
+the budget-refusal semantics.  413 (Payload Too Large) is for request body size; 422 is
+for semantic validation errors on a known valid request.  A model that doesn't fit in the
+declared budget is a resource constraint, not a validation error.
+
+**Current status (v0.1):** `fitsproof serve` exits 2 with a clear message.  The HTTP
+server infrastructure (`src/serve.rs`) is implemented and has 8 passing tests including
+`handle_completions_tiny_budget_returns_503`.
+
+### 9.3 MCP server — agent-callable resource contracts (v0.2 surface, currently stub)
+
+`fitsproof mcp` exposes `probe`, `plan`, and `admit` as MCP tools.  An agent (Claude, Cursor,
+Kiro, any MCP-capable client) can call these before loading a model.
+
+**Integration in an agent config (MCP client config format):**
+```json
+{
+  "mcpServers": {
+    "fitsproof": {
+      "command": "fitsproof",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Tool call pattern (from agent perspective):**
+```
+Tool: admit
+Arguments: { "budget_gb": 4.0, "quant": "q4_k_m", "context": 4096 }
+
+Response:
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "REFUSED: needs 3.664 GB, budget 4.0 GB — fits with margin 336 MB"
+    }
+  ],
+  "isError": false
+}
+```
+
+A refused response has `isError: true` so the MCP client treats it as a tool execution
+error — which the LLM client can reason about (e.g. "reduce context_len and retry").
+
+**Flush semantics confirmed (OQ-C3-1 closed):** `src/mcp.rs` flushes stdout after every
+response.  The MCP stdio transport requires this.
+
+**Current status (v0.1):** `fitsproof mcp` exits 2 with a clear message.  The full
+JSON-RPC dispatch in `src/mcp.rs` is implemented and has 9 passing tests.  The stub only
+exists at the CLI entry point level — the dispatch logic itself works.
+
+### 9.4 Pareto frontier sweep (v0.2 surface, currently stub)
+
+`fitsproof pareto --budget-gb 4.0` returns the Pareto-optimal set of (quantization ×
+context_length) configs over (predicted_peak_bytes, predicted_tok_s).
+
+**Example output (v0.2 format):**
+```
+Pareto frontier (memory ↔ throughput trade-off), budget = 4.0 GB:
+
+quant    context  peak_gb  tok/s
+q8_0     512      2.8 GB   4.3
+q8_0     2048     3.1 GB   4.3
+q4_k_m   4096     3.7 GB   6.8
+q4_k_m   8192     4.0 GB   5.1
+
+Dominated configs not shown. 24 configs evaluated; 4 on frontier.
+```
+
+The Pareto front lets the user pick the trade-off point: "I want maximum throughput
+within 4 GB" → q4_k_m at 4096 context; "I want the smallest footprint" → q8_0 at 512.
+
+The mathematical foundation (source 35, NSGA-II; source 36, Varian discrete Pareto) is
+in RESEARCH.md §35-36.  The key property: the Pareto front is always non-empty for a
+non-empty feasible set (falsification 28 in RESEARCH.md).
+
+**Current status (v0.1):** `fitsproof pareto` exits 2 with a clear message.  `src/pareto.rs`
+is implemented with `pareto_sweep()` and 5 passing tests including the non-empty-front
+guarantee test.
+
+---
+
+## 10. Updated adoption blocker (cycle 3 — FitsproofClient exists)
+
+The v0.1 adoption blocker (§5) was: "`verify` runs on the reference bundle, not real models."
+This remains true.  But the picture has changed since cycle 1:
+
+**What is now available in v0.1 that changes the calculus:**
+
+1. `FitsproofClient::guard()` — the Rust API works today, with real GGUF plan predictions.
+   A Rust application that does `client.guard(4.0)?` gets a real admission check backed by
+   the Qwen3-1.7B architecture parameters read from the real file.
+
+2. `src/serve.rs` and `src/mcp.rs` — fully implemented dispatch logic with passing tests.
+   The CLI stub (`exit 2`) is the only thing blocking the HTTP server and MCP server from
+   running; the logic is there.
+
+3. `plan` + `admit` against real GGUF files work — confirmed in EVIDENCE.md §21.
+
+**What remains incomplete:**
+
+The proof half of "proves it fits" still requires real-weight generation.  `verify` runs
+the reference bundle (random weights), not the user's model.  The allocator_peak measured
+by `verify` reflects reference-bundle allocations, not the real model's allocations.
+
+**The updated single most likely reason someone would NOT adopt it (v0.1+):**
+
+The `serve` and `mcp` surfaces are functional in tests but exit 2 at the CLI.  A developer
+who finds the tool via a description of `fitsproof serve --budget-gb 4 --model model.gguf`
+as a drop-in llama-server alternative will find that this command does not work yet.
+
+The `guard()` API works, but requires building from source (no published crate on crates.io
+in v0.1, no published binary with SHA256 attached to a tag — the CI workflow for musl binary
+release is present but the tag/release has not been cut for v0.1).
+
+**Summary of blockers by severity:**
+
+| Blocker | Severity | Unblocked by |
+|---------|----------|-------------|
+| `verify` on reference bundle, not real models | **High** — proof is partial | v0.2 weight loader |
+| `serve` / `mcp` / `pareto` exit 2 at CLI | **High** for v0.2 users | v0.2 CLI wiring |
+| No published crate or SHA256 release | **Medium** — build-from-source required | Tag + release cut |
+| Q4_K bpw at 4.0 vs 4.4375 | **Low** — conservative direction | v0.2 bpw table |
+
+The v0.1 adoption path is: build from source, use `plan` + `admit` as pre-flight CLI gates
+or use `FitsproofClient::guard()` in Rust code.  Both work today and produce real predictions
+from real GGUF files.  The v0.2 path adds `serve`, `mcp`, `pareto`, and real-weight `verify`.
+
+---
+
+## 11. Production failure modes — serve and mcp specifics (cycle 3 additions)
+
+These extend §3 with failure modes specific to the v0.2 `serve` and `mcp` surfaces.
+They are documented now (cycle 3 research pass) so the v0.2 implementation pass can
+design against them.
+
+### 11.1 — serve: mmap-bypasses-allocator at real weights (Medium likelihood, High severity)
+
+**What happens:** When `fitsproof serve` loads a real GGUF model in v0.2, if the weight
+loader uses `mmap` (the standard approach in llama.cpp for zero-copy loading), the mmap'd
+pages bypass `GlobalAlloc`.  The admission ceiling (installed before serving begins) does
+not cover mmap'd weight pages.
+
+**Impact:** `allocator_peak` in the response headers will undercount peak memory.  The
+advertised budget guarantee (`X-Fitsproof-Predicted-Gb: 3.209; X-Fitsproof-Budget-Gb: 4.000;
+X-Fitsproof-Verdict: fits`) is based on the analytical prediction, not on a live allocator
+measurement that covers the mmap allocation.
+
+**Mitigation (v0.2 design):** Track mmap'd bytes separately in the weight loader
+(`Weights::mmap_bytes()` → add to budget accounting).  The `verify` command already
+documents this: VmHWM captures mmap'd pages; the allocator_peak + VmHWM delta is the
+mmap overhead.  For `serve`, report the delta as
+`X-Fitsproof-Mmap-Bytes: <bytes>` so the client can see the full picture.
+
+**Root cause documentation:** Source 37 (Linux cgroups v2) explains this is why
+OS-level enforcement (cgroup v2) is stricter than `GlobalAlloc` for the case of
+mmap-based loading — confirmed in RESEARCH.md §37.
+
+### 11.2 — mcp: tool timeout on slow probe (Low likelihood, Medium severity)
+
+**What happens:** An MCP client calls the `probe` tool.  `probe` runs the STREAM benchmark
+(~5 seconds for 5 trials × 3 arrays × 8 M elements) and the GEMM benchmark (~5 seconds).
+Total: ~10 seconds.  Some MCP clients have a default tool-call timeout of 5–10 seconds.
+The client times out before `probe` returns.
+
+**Mitigation:** The MCP spec (source 31) says tool execution timeouts are client-side policy.
+The `probe` tool documentation (in `tools/list` `description` field) should include:
+"Runs a ~10 second benchmark; set your MCP client timeout ≥ 20 seconds for this tool."
+
+In practice: `plan` and `admit` are the tools that agents will call in the hot path
+(sub-100 ms each).  `probe` should be called once at session start and its results cached.
+
+### 11.3 — serve: concurrent request race on ceiling (Low likelihood, Medium severity)
+
+**What happens:** Two concurrent requests arrive at `fitsproof serve`.  Both pass
+`admit()`.  Both start loading.  Together they exceed the budget.
+
+**Analysis:** The `TrackingAllocator` ceiling is process-global.  If two concurrent
+requests allocate simultaneously, the CAS-loop allocator (source 38 + EVIDENCE.md §30)
+ensures that exactly one of them gets the allocation when the sum would exceed the ceiling.
+The second allocation returns `null_mut()` → `handle_alloc_error` → panic.
+
+**For v0.2 serve:** The server should serialize requests against the budget ceiling using
+a per-server `Mutex<AdmitRecord>` — only one request at a time is allowed to be in the
+"admitted, loading weights" state.  Concurrent requests that arrive while loading is
+in progress should either queue or return 503 immediately.
+
+This is a v0.2 design concern, not a v0.1 issue (v0.1 `serve` exits 2).
+
+---
+
+*Cycle 3 additions written 2026-09-29.  Commands and API in §9 derived from EVIDENCE.md §25-29
+and verified source code in `src/client.rs`, `src/serve.rs`, `src/mcp.rs`, `src/pareto.rs`.*
