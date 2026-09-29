@@ -370,32 +370,62 @@ mod tests {
         );
     }
 
-    /// Fault detected (REGRESSION — was the critical bug): kv_cache_bytes was previously
-    /// called with the weight quantisation ("int4_sym"), producing a 4× underestimate.
+    /// Fault detected (REGRESSION GUARD): `estimate()` couples KV cache bytes to weight
+    /// quantisation — i.e., the caller passes `quant` to `kv_cache_bytes` instead of
+    /// hardcoding `"fp16"`.
     ///
     /// The KV cache precision is the ACTIVATION dtype (fp16 by default), not the weight
-    /// quantisation format.  This test proves that a model with int4 weights has the SAME
-    /// KV cache size as a model with fp32 weights when both use the default fp16 KV cache.
+    /// quantisation format.  A model with int4 weights has the SAME KV cache size as a
+    /// model with fp32 weights when both use the default KV dtype.
     ///
-    /// Expected: kv_cache_bytes(fp16) == kv_cache_bytes(fp16) regardless of weight quant.
-    /// If this test breaks, it means kv_cache_bytes is being accidentally coupled to weight quant.
+    /// The regression this test guards against: if someone changes `estimate()` to call
+    /// `kv_cache_bytes(cfg, context_len, quant)` instead of
+    /// `kv_cache_bytes(cfg, context_len, "fp16")`, the int4 estimate drops 4× and int8
+    /// drops 2×, causing silent under-prediction for quantised models.
+    ///
+    /// Ground truth (hand-computed, fp16 = 2 bytes/element, context=512):
+    ///   2 * 6 * 2 * 512 * 64 * 2 = 3_145_728 bytes
+    /// This must equal `kv_cache_bytes` in both the fp32-weight and int4-weight estimates.
+    ///
+    /// Previous version of this test was VACUOUS: it called `kv_cache_bytes(&cfg, 512, "fp16")`
+    /// twice with identical arguments and asserted equality — a tautology that cannot detect
+    /// the regression it was written to prevent.  This replacement tests through `estimate()`
+    /// with differing weight quants, exercising the actual coupling point.
     #[test]
     fn kv_cache_bytes_independent_of_weight_quant() {
         let cfg = ref_cfg();
-        // KV cache at fp16 must be the same regardless of weight quant — they are independent.
-        let kv_fp32_weights = kv_cache_bytes(&cfg, 512, "fp16"); // model with fp32 weights
-        let kv_int4_weights = kv_cache_bytes(&cfg, 512, "fp16"); // model with int4 weights
+        let machine = ref_machine();
+
+        // Run estimate() with fp32 weights and with int4 weights.
+        // If estimate() internally passes the weight quant to kv_cache_bytes (the regression),
+        // the int4 estimate will be 4× smaller than the fp32 estimate — this catches it.
+        let est_fp32 = estimate(&cfg, &machine, 512, "none", 0.6);
+        let est_int4 = estimate(&cfg, &machine, 512, "int4_sym", 0.6);
+
         assert_eq!(
-            kv_fp32_weights, kv_int4_weights,
-            "KV cache (fp16) must be identical for fp32 and int4 weight models: \
-             fp32_weights={kv_fp32_weights}, int4_weights={kv_int4_weights}"
+            est_fp32.kv_cache_bytes, est_int4.kv_cache_bytes,
+            "estimate().kv_cache_bytes must be identical for fp32 and int4 weight models: \
+             fp32_weights={}, int4_weights={}",
+            est_fp32.kv_cache_bytes, est_int4.kv_cache_bytes
         );
+
+        // Confirm against hand-computed ground truth: 2 * 6 * 2 * 512 * 64 * 2 = 3_145_728
+        let expected_kv: u64 = 2 * 6 * 2 * 512 * 64 * 2;
+        assert_eq!(
+            est_fp32.kv_cache_bytes, expected_kv,
+            "kv_cache_bytes for fp32-weight model must match hand-computed fp16 ground truth: \
+             got {}, expected {expected_kv}",
+            est_fp32.kv_cache_bytes
+        );
+
         // Separately confirm that a fp32 KV cache (explicit) is 2× fp16 KV cache.
         let kv_fp32_kv = kv_cache_bytes(&cfg, 512, "none"); // explicit fp32 KV (unusual)
         assert_eq!(
             kv_fp32_kv,
-            kv_fp32_weights * 2,
-            "fp32 KV cache must be 2× fp16 KV cache (got fp32_kv={kv_fp32_kv}, fp16_kv={kv_fp32_weights})"
+            expected_kv * 2,
+            "fp32 KV cache must be 2× fp16 KV cache \
+             (got fp32_kv={kv_fp32_kv}, expected {})",
+            expected_kv * 2
         );
     }
 

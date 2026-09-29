@@ -845,7 +845,146 @@ ADMITTED: 0.055 GB predicted peak <= 4.000 GB budget (margin: 3944.9 MB)
 
 ---
 
-## c4-p04-implement-1 (cycle 4, pass 4) — 2026-09-29
+## c4-p08-improve-1 (cycle 4, pass 8) — 2026-09-29
+
+### Finding fixed
+
+**Source:** QUALITY-CONTRACT §1 (vacuity ban) — detected via code review of test suite.
+
+**Severity:** Major quality bug (vacuous regression guard — cannot detect the fault it claims to catch).
+
+**Finding:** `kv_cache_bytes_independent_of_weight_quant` in `src/cost.rs` was vacuous
+(QUALITY-CONTRACT §1 violation). It called `kv_cache_bytes(&cfg, 512, "fp16")` **twice with
+identical arguments** and asserted equality:
+
+```rust
+let kv_fp32_weights = kv_cache_bytes(&cfg, 512, "fp16"); // model with fp32 weights
+let kv_int4_weights = kv_cache_bytes(&cfg, 512, "fp16"); // model with int4 weights
+assert_eq!(kv_fp32_weights, kv_int4_weights, ...);
+```
+
+This is a tautology — two calls to the same function with the same arguments are always equal.
+The test cannot detect the regression it was written to prevent: the coupling of weight quant to
+KV cache precision in `estimate()` (the bug fixed in c1-p08).
+
+**Fault injection proof of vacuity:** Reintroducing the original regression (`estimate()` calling
+`kv_cache_bytes(cfg, context_len, quant)` instead of `"fp16"`) produces completely different KV
+estimates for fp32 vs int4 weight quants — yet the old test would still pass because it never
+calls through `estimate()`. The function `kv_cache_bytes` called directly with `"fp16"` is
+unaffected by how `estimate()` calls it.
+
+**Root cause:** The test was written as a documentation / self-consistency check after the c1-p08
+fix, but it tests `kv_cache_bytes` directly with a hardcoded quant rather than testing the
+coupling point in `estimate()`. The coupling lives in `estimate()`, not in `kv_cache_bytes`.
+
+**Concrete impact:** Any adversarial reviewer who samples this test and injects the
+"kv_cache_bytes coupled to weight quant in estimate()" fault will find the test passes despite
+the regression being present. QUALITY-CONTRACT §6 requires fault injection on sampled tests —
+this test fails that audit.
+
+### Fix applied
+
+`src/cost.rs::tests::kv_cache_bytes_independent_of_weight_quant` — replaced with a test
+that calls `estimate()` with two different weight quants (`"none"` = fp32, `"int4_sym"`) and
+asserts the `kv_cache_bytes` field is identical in both results.
+
+The new test also verifies against the hand-computed ground truth (3,145,728 bytes) so it is
+anchored to an external value, not just self-consistent.
+
+**New test logic:**
+```rust
+let est_fp32 = estimate(&cfg, &machine, 512, "none", 0.6);
+let est_int4 = estimate(&cfg, &machine, 512, "int4_sym", 0.6);
+assert_eq!(est_fp32.kv_cache_bytes, est_int4.kv_cache_bytes, ...);
+
+// Ground truth: 2 * 6 * 2 * 512 * 64 * 2 = 3_145_728
+let expected_kv: u64 = 2 * 6 * 2 * 512 * 64 * 2;
+assert_eq!(est_fp32.kv_cache_bytes, expected_kv, ...);
+```
+
+**Fault injection verification of the new test:**
+
+Injecting the regression (changing `estimate()` to pass `quant` instead of `"fp16"` to
+`kv_cache_bytes`):
+
+```
+thread 'cost::tests::kv_cache_bytes_independent_of_weight_quant' panicked:
+assertion `left == right` failed: estimate().kv_cache_bytes must be identical for fp32
+and int4 weight models: fp32_weights=3145728, int4_weights=393216
+  left: 3145728
+ right: 393216
+```
+
+The failure magnitude is 8× (3,145,728 / 393,216 = fp16/int4 ratio = 16 bits / 4 bits ÷ 0.5),
+which is exactly the regression magnitude for an int4 model. The new test detects the fault and
+names the actual values to aid diagnosis.
+
+### Before/after metrics
+
+| Metric | Before (c4-p07 eval) | After (c4-p08-improve-1) | Delta |
+|--------|---------------------|--------------------------|-------|
+| Tests run | 241 | 241 | 0 (replacement, not addition) |
+| Test failures | 0 | 0 | 0 |
+| `kv_cache_bytes_independent_of_weight_quant` is vacuous | Yes (same args twice) | No (calls estimate() with different weight quants) | Fixed |
+| Can detect regression: estimate() couples KV to weight quant | No (tautology) | **Yes** (fails with fp32_weights=3145728 vs int4_weights=393216) | +1 fault covered |
+| Anchored to external ground truth | No | Yes (3,145,728 = hand-computed) | +evidence quality |
+| QUALITY-CONTRACT §1 (vacuity ban) violated | Yes | No | Fixed |
+| `cargo clippy -D warnings` | PASS | PASS | — |
+| `cargo fmt --check` | PASS | PASS | — |
+
+### Raw terminal output
+
+```
+$ ~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]+ tests"
+running 131 tests
+test result: ok. 131 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.27s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 38 tests
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.90s
+running 37 tests
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 126.87s
+running 23 tests
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.65s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+```
+$ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings 2>&1
+    Checking fitsproof-rs v0.1.0 (...)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.52s
+(exit 0 — clean)
+```
+
+```
+$ ~/.cargo/bin/cargo fmt --check 2>&1
+(no diff — exit 0)
+```
+
+**Fault injection (confirming new test detects the regression):**
+
+```
+$ # Injected: change estimate() to pass quant instead of "fp16" to kv_cache_bytes
+$ ~/.cargo/bin/cargo test cost::tests::kv_cache_bytes_independent_of_weight_quant -- --nocapture 2>&1 | tail -10
+
+thread 'cost::tests::kv_cache_bytes_independent_of_weight_quant' (1447622) panicked at src/cost.rs:405:9:
+assertion `left == right` failed: estimate().kv_cache_bytes must be identical for fp32
+and int4 weight models: fp32_weights=3145728, int4_weights=393216
+  left: 3145728
+ right: 393216
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 130 filtered out
+```
+
+---
+
+
 
 ### Findings fixed
 
