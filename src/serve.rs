@@ -297,6 +297,39 @@ fn handle_models() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Test helper (exposed for integration tests in tests/adversarial.rs)
+// ---------------------------------------------------------------------------
+
+/// Dispatch a single HTTP request by path and body string.
+///
+/// Returns (status_code, response_body). Exposed for integration tests — not
+/// part of the stable public API. Uses a synthetic machine profile.
+#[doc(hidden)]
+pub fn handle_request_for_test(path: &str, body: &str) -> (u16, String) {
+    let machine = MachineProfile {
+        hostname: "test".into(),
+        platform_str: "test".into(),
+        measured_at: 1_000_000.0,
+        memory_bandwidth_bps: 20_000_000_000.0,
+        gemm_throughput_flops: 100_000_000_000.0,
+        memory_bytes: 32 * 1024 * 1024 * 1024,
+        gpu_memory_bytes: 0,
+        cpu_count: 8,
+    };
+    match path {
+        "/v1/chat/completions" | "/v1/chat/completions/" => {
+            handle_completions(body.as_bytes(), &machine)
+        }
+        "/v1/models" | "/v1/models/" => (200, handle_models()),
+        "/health" => (200, r#"{"status":"ok"}"#.to_string()),
+        _ => (
+            404,
+            r#"{"error":{"message":"Not found","type":"invalid_request_error"}}"#.to_string(),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main server loop
 // ---------------------------------------------------------------------------
 

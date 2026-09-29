@@ -692,3 +692,135 @@ fn guard_error_display_names_binding_constraint() {
         "GuardError.binding_constraint must not be empty"
     );
 }
+
+/// ATTACK: MCP handle_rpc silently accepts garbage input and returns a success response.
+///
+/// Fault detected: A missing `method` field in the JSON-RPC request must return
+/// an error response (-32600), not a success. A naive handler that defaults to
+/// any method when the field is absent would bypass error handling.
+#[test]
+fn mcp_missing_method_returns_rpc_error() {
+    use fitsproof::mcp::handle_rpc_for_test;
+    // No "method" field — must return a JSON-RPC error, not a result.
+    let resp = handle_rpc_for_test(r#"{"jsonrpc":"2.0","id":1,"params":{}}"#);
+    assert!(
+        resp.contains("\"error\""),
+        "missing method must return JSON-RPC error object, got: {resp}"
+    );
+    assert!(
+        !resp.contains("\"result\""),
+        "missing method must not return a result, got: {resp}"
+    );
+}
+
+/// ATTACK: MCP tools/call with an unknown tool name returns a success (content) response.
+///
+/// Fault detected: Unknown tool names must return a JSON-RPC error (-32603), not an
+/// empty content array or a success with null content. A bug where the match arm
+/// falls through to Ok("") would pass an empty content as success.
+#[test]
+fn mcp_unknown_tool_returns_error() {
+    use fitsproof::mcp::handle_rpc_for_test;
+    let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"doesnotexist","arguments":{}}}"#;
+    let resp = handle_rpc_for_test(req);
+    assert!(
+        resp.contains("\"error\""),
+        "unknown tool must return JSON-RPC error, got: {resp}"
+    );
+}
+
+/// ATTACK: Pareto sweep with a budget of 0 bytes produces a non-empty frontier.
+///
+/// Fault detected: If the budget comparison is wrong (e.g. `>=` instead of `>`),
+/// a zero budget could admit at least one config. The Pareto frontier for budget=0
+/// must be empty — nothing can fit in 0 bytes.
+#[test]
+fn pareto_zero_budget_empty_frontier() {
+    use fitsproof::model::ModelConfig;
+    use fitsproof::pareto::pareto_sweep;
+    use fitsproof::probe::MachineProfile;
+    let cfg = ModelConfig::reference();
+    let machine = MachineProfile {
+        hostname: "test".into(),
+        platform_str: "test".into(),
+        measured_at: 1_000_000.0,
+        memory_bandwidth_bps: 20_000_000_000.0,
+        gemm_throughput_flops: 100_000_000_000.0,
+        memory_bytes: 32 * 1024 * 1024 * 1024,
+        gpu_memory_bytes: 0,
+        cpu_count: 4,
+    };
+    let result = pareto_sweep(&cfg, &machine, 0);
+    assert!(
+        result.frontier.is_empty(),
+        "Pareto frontier for budget=0 bytes must be empty, got {} configs",
+        result.frontier.len()
+    );
+}
+
+/// ATTACK: Pareto frontier contains a dominated config (both peak and context are worse
+/// than another config on the frontier).
+///
+/// Fault detected: If the dominance check is wrong (e.g. strict `<` replaced with `<=`),
+/// configs equal on both axes would be incorrectly pruned, and the Pareto property
+/// could be violated. We verify no config on the frontier is strictly dominated.
+#[test]
+fn pareto_frontier_has_no_dominated_configs() {
+    use fitsproof::model::ModelConfig;
+    use fitsproof::pareto::pareto_sweep;
+    use fitsproof::probe::MachineProfile;
+    let cfg = ModelConfig::reference();
+    let machine = MachineProfile {
+        hostname: "test".into(),
+        platform_str: "test".into(),
+        measured_at: 1_000_000.0,
+        memory_bandwidth_bps: 20_000_000_000.0,
+        gemm_throughput_flops: 100_000_000_000.0,
+        memory_bytes: 32 * 1024 * 1024 * 1024,
+        gpu_memory_bytes: 0,
+        cpu_count: 4,
+    };
+    let result = pareto_sweep(&cfg, &machine, 4_000_000_000);
+    let frontier = &result.frontier;
+    // For every pair (a, b) on the frontier, a must not strictly dominate b.
+    for (i, a) in frontier.iter().enumerate() {
+        for (j, b) in frontier.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let a_dominates_b =
+                a.predicted_peak_bytes < b.predicted_peak_bytes && a.context_len > b.context_len;
+            assert!(
+                !a_dominates_b,
+                "frontier config [{i}] strictly dominates [{j}]: \
+                 peak {:.3}GB ctx {} vs peak {:.3}GB ctx {}",
+                a.predicted_peak_bytes as f64 / 1e9,
+                a.context_len,
+                b.predicted_peak_bytes as f64 / 1e9,
+                b.context_len,
+            );
+        }
+    }
+}
+
+/// ATTACK: serve HTTP endpoint returns 200 with an empty body for a refused budget.
+///
+/// Fault detected: When the admit result is Refused, the server must return 503 (not 200)
+/// and the body must contain the binding constraint. A bug where the status code is
+/// hardcoded to 200, or where refused responses are serialised as normal completions,
+/// would defeat CI gating on the contract.
+#[test]
+fn serve_refused_budget_returns_503() {
+    use fitsproof::serve::handle_request_for_test;
+    // Request body with an impossibly small budget (0.000001 GB).
+    let body = r#"{"model":"fitsproof/ref","messages":[{"role":"user","content":"hi"}],"budget_gb":0.000001}"#;
+    let (status_code, response_body) = handle_request_for_test("/v1/chat/completions", body);
+    assert_eq!(
+        status_code, 503,
+        "refused budget must return HTTP 503, got {status_code}; body: {response_body}"
+    );
+    assert!(
+        response_body.contains("binding_constraint") || response_body.contains("REFUSED"),
+        "503 body must name the binding constraint, got: {response_body}"
+    );
+}

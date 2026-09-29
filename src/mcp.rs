@@ -280,6 +280,15 @@ pub fn run_stdio() {
     }
 }
 
+/// Dispatch a single JSON-RPC line and return the response string.
+///
+/// Exposed for integration tests in `tests/adversarial.rs`.  Not part of the
+/// public API — callers should use `run_stdio` in production.
+#[doc(hidden)]
+pub fn handle_rpc_for_test(line: &str) -> String {
+    handle_rpc(line)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
