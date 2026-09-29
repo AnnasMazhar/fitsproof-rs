@@ -823,3 +823,262 @@ This is a v0.2 design concern, not a v0.1 issue (v0.1 `serve` exits 2).
 
 *Cycle 3 additions written 2026-09-29.  Commands and API in §9 derived from EVIDENCE.md §25-29
 and verified source code in `src/client.rs`, `src/serve.rs`, `src/mcp.rs`, `src/pareto.rs`.*
+
+---
+
+## 12. Speculative decoding and mmap weight loading — v0.2 budget implications (cycle 4 additions)
+
+These two topics were opened as research questions in cycle 4 passes 1-2 (OQ-C4-1, OQ-C4-2,
+OQ-C4-3) and are closed here with concrete adoption guidance.
+
+### 12.1 — Speculative decoding: budget your draft model too
+
+Speculative decoding (Leviathan et al. 2022 — RESEARCH.md §47; Chen et al. 2023 — §54) loads
+a small **draft model** alongside the large **target model** to generate candidate tokens cheaply,
+then validates them in one parallel pass.  Both models must be resident simultaneously.
+
+**The planning mistake:** a user runs:
+
+```bash
+fitsproof admit --model qwen3-7b.gguf --quant q4_k_m --context 4096 --budget-gb 4
+# → ADMITTED: 3.5 GB predicted peak ≤ 4.0 GB budget (margin: 500 MB)
+```
+
+They then launch mistral.rs or llama.cpp with speculative decoding using a 1B draft model
+(~500 MB Q4_K_M).  Combined peak: 3.5 + 0.5 = 4.0 GB — no margin, hits OOM.
+
+**Correct pre-flight check for speculative decoding (v0.1 workaround):**
+
+Use `--budget-gb` reduced by the draft model's predicted weight bytes:
+
+```bash
+# Step 1 — plan the draft model alone to get its weight bytes
+fitsproof plan --model qwen3-0.5b.gguf --quant q4_k_m --context 4096 --budget-gb 99
+# → predicted_peak: 0.25 GB
+
+# Step 2 — admit target model with draft overhead subtracted from budget
+fitsproof admit \
+  --model qwen3-7b.gguf \
+  --quant q4_k_m \
+  --context 4096 \
+  --budget-gb 3.75   # = 4.0 − 0.25 draft overhead
+```
+
+If this admits, both models fit with margin.  If it refuses, you do not have headroom for
+speculative decoding at this budget — use a smaller draft or lower context.
+
+**v0.2 fix (filed as OQ-C4-1):** `--draft-model` flag adds draft weight bytes automatically:
+
+```bash
+fitsproof admit \
+  --model qwen3-7b.gguf \
+  --draft-model qwen3-0.5b.gguf \
+  --quant q4_k_m \
+  --context 4096 \
+  --budget-gb 4.0
+# → REFUSED: needs 4.2 GB (target=3.5 GB + draft=0.25 GB + kv=0.47 GB), budget 4.0 GB
+# exit 2 — with the draft overhead visible in the breakdown
+```
+
+**Rule of thumb:** Standard draft model size ratios and their weight overhead at Q4_K_M:
+
+| Draft/Target ratio | Example pair | Draft overhead (approx) |
+|---|---|---|
+| 1/14 | Qwen3-0.5B / 7B | 7% of target |
+| 1/8  | Llama-3.2-1B / 8B | 12.5% of target |
+| 1/7  | Llama-3.2-1B / 7B | 14% of target |
+
+The 1/7 and 1/8 ratios exceed the 10% headroom the earlier sections recommended.  For these
+pairs, reduce your declared budget by 15–20% before running `admit`.
+
+### 12.2 — mmap weight loading: what verify's delta means in v0.2
+
+In v0.2, `Weights::from_gguf()` will use `memmap2::Mmap` to map the tensor data section of
+the GGUF file into the process's virtual address space (source 52 in RESEARCH.md).  This is
+the zero-copy approach used by llama.cpp and RustyLLM — it avoids copying 3–14 GB of weights
+into the heap.
+
+**What this changes for `verify` output:**
+
+In v0.1 (heap-allocated random weights):
+```
+allocator_peak: 3.562 GB   ← includes weights (heap-allocated in Vec<f32>)
+VmHWM:          3.621 GB
+delta:          +0.059 GB  ← only Rust runtime overhead (~60 MB)
+```
+
+In v0.2 (mmap'd real weights):
+```
+allocator_peak: 0.051 GB   ← heap only: KV cache + activations + runtime allocs
+VmHWM:          3.621 GB   ← includes mmap'd weight pages in resident set
+delta:          +3.570 GB  ← ≈ weight_bytes (the mmap component)
+```
+
+**The delta becomes the weight file size.**  This is by design: `verify`'s dual-measurement
+approach was specifically designed to make the mmap overhead visible rather than hiding it.
+
+**How to interpret v0.2 verify output:**
+
+- `allocator_peak` ≈ KV cache + activation scratch + runtime allocations (~60 MB overhead)
+- `delta` ≈ `weight_bytes(model, quant)` — compare to the `plan()` prediction
+- If `delta` > `predicted_peak × 1.15`, the prediction has a larger-than-expected error;
+  check whether the model has full-precision embedding tensors (§8.2 above)
+- `budget_respected: true/false` is based on VmHWM vs budget — the full picture
+
+**Why TrackingAllocator cannot prevent mmap OOM:**
+
+The `GlobalAlloc` ceiling (`TrackingAllocator`) only sees heap allocations.  If the mmap'd
+weight pages cause the process to approach the OS-level memory limit, the kernel OOM killer
+fires — not the allocator ceiling.  The `admit()` pre-flight check is the defence here:
+it rejects configs where `predicted_peak > budget` before any mmap occurs.
+
+For users who want a hard OS-level backstop in addition to the pre-flight check, combining
+fitsproof-rs with AURA's cgroup v2 enforcement (§7) is the correct pattern:
+
+```bash
+# fitsproof pre-flight: typed refusal if weight_bytes + kv exceeds budget
+fitsproof admit --model "$MODEL" --quant q4_k_m --context 4096 --budget-gb 4
+
+# AURA runtime: cgroup v2 ceiling catches any mmap or C-library allocation not seen by GlobalAlloc
+aura run --model "$MODEL" --budget 4gb
+```
+
+**Filed as OQ-C4-3:** The v0.2 `VerifyRecord` will add `mmap_tracked_bytes` and
+`unexplained_delta` fields so users can distinguish weight-mmap bytes from runtime overhead:
+
+```
+allocator_peak:      0.051 GB
+mmap_tracked_bytes:  3.562 GB  (fitsproof-tracked weight mmap)
+vmhwm:               3.621 GB
+unexplained_delta:  +0.008 GB  (should match v0.1 runtime overhead ~60 MB)
+budget:              4.000 GB
+budget_respected:    true
+```
+
+If `unexplained_delta` is much larger than ~60 MB, there is an untracked memory source
+(a C library, JVM, or other allocator not going through Rust's GlobalAlloc).
+
+### 12.3 — FlashAttention tiling: required at long context for real models
+
+Filed as OQ-C4-2 in RESEARCH.md cycle 4 pass 1 (source 49 — FlashAttention-2).
+
+**The problem:** The v0.1 scalar reference engine materialises the full N × N attention score
+matrix per layer (O(N²) per head).  For a real 7B model (32 heads) at 4096 context:
+
+```
+attention_scratch = 32 × 4096 × 4096 × 4 bytes = 2.15 GB
+```
+
+This is the attention scratch per layer.  Without tiling, this exceeds the entire weight
+budget on 4 GB hardware.  The model cannot run at 4096 context without tiling, regardless
+of quantisation.
+
+**Why it doesn't affect v0.1:** The reference bundle uses `seq_len ≤ 512` and 2 heads:
+```
+attention_scratch = 2 × 512 × 512 × 4 = 2.1 MB  (negligible)
+```
+All 216 tests pass; the stress harness passes; the contract proofs pass.  v0.1 is unaffected.
+
+**What v0.2 must implement:** FlashAttention-2 tiling in `src/engine/ops.rs:gqa_attention`.
+Tiles of `B_r × B_c = 32 × 32` at f32 = 4 kB per tile — fits in 32 kB L1 cache.  With
+tiling, the activation scratch is O(N) (one tile at a time, never the full N × N matrix).
+
+**Adoption consequence:** A user who expects to run `fitsproof verify --model 7b.gguf
+--context 4096` in v0.2 without FlashAttention tiling will get an OOM on 4 GB hardware
+during the attention forward pass — not from weights, but from the scratch buffer.  This
+is documented here so the v0.2 implementation pass addresses it before shipping.
+
+**Pre-flight mitigation (v0.1 workaround):** For real models with `num_heads ≥ 16` and
+context > 2048, add the activation scratch manually to your budget calculation:
+
+```
+scratch_per_layer = num_heads × context² × 2 bytes (fp16)
+total_budget_needed = plan_prediction + scratch_per_layer
+```
+
+For a 7B model at 2048 context: `32 × 2048² × 2 = 268 MB` — add 0.3 GB to the `admit`
+budget threshold before concluding it fits.
+
+---
+
+## 13. Updated ecosystem context and adoption position (cycle 4)
+
+Cycle 4 pass 2 added two Rust LLM inference tools to the comparison:
+**mistral.rs** (7,722★) and **RustyLLM** (7★).  Neither closes the gap on the five
+properties (pre-flight typed refusal, typed degradation records, portable offline stress
+harness, allocator_peak + VmHWM delta, primary target hardware class).
+
+**What this means for adoption positioning:**
+
+1. **mistral.rs is an engine, not a planner.** It is faster, broader, and better-supported than
+   fitsproof-rs's reference engine.  A user running mistral.rs as their inference engine should
+   still use `fitsproof admit` as a pre-flight gate:
+
+   ```bash
+   fitsproof admit --model "$MODEL" --quant q4_k_m --context 4096 --budget-gb 4
+   # exit 2 → don't launch mistral.rs
+   # exit 0 → launch mistral.rs with confidence
+   mistralrs-server --model "$MODEL" --port 8080
+   ```
+
+   The mistral.rs CVE (unbounded remote media fetch → OOM-kill, filed Sep 2026 by SecureLayer7
+   Labs) is exactly the failure mode a pre-flight budget check cannot prevent on its own —
+   a remote URL in the request body can cause unbounded allocation after admission.  This
+   underscores the value of the TrackingAllocator ceiling as a backstop alongside `admit()`.
+
+2. **RustyLLM's MCP server confirms the market need for MCP-based resource contracts.**
+   RustyLLM ships `generate`/`chat`/`embed`/`models` as MCP tools.  No tool ships
+   `probe`/`plan`/`admit` as MCP tools.  fitsproof-rs v0.2's MCP server fills this gap.
+
+3. **The consumer hardware class remains unserved.** mistral.rs primary targets are GPU-
+   accelerated (CUDA, Metal); RustyLLM's primary target is Apple Silicon.  Neither treats
+   4–8 GB VRAM / 16–32 GB DDR4/DDR5 x86_64 as the primary hardware class.  The target
+   audience for fitsproof-rs has not been served by either new entrant.
+
+**Current adoption summary (cycle 4, 2026-09-29):**
+
+| Surface | Status | Adoption pattern |
+|---------|--------|-----------------|
+| `fitsproof admit` / `plan` / `probe` | **Fully functional** | CLI pre-flight gate; 1-line CI integration |
+| `FitsproofClient::guard()` | **Fully functional** | Rust API; `?`-operator error propagation |
+| `fitsproof verify` | **Partial** (reference bundle) | Trust the plan; real-weight verify in v0.2 |
+| `fitsproof stress` | **Fully functional** | CI harness; offline; no engine required |
+| `fitsproof serve` | **v0.2 (stub)** | Swap `base_url` in any OpenAI client |
+| `fitsproof mcp` | **v0.2 (stub)** | Add to agent MCP config; `probe/plan/admit` tools |
+| `fitsproof pareto` | **v0.2 (stub)** | Sweep quant × context; find budget-optimal config |
+| Speculative decoding budget | **v0.2** (`--draft-model` flag) | Subtract draft weight bytes manually today |
+| mmap-separated verify output | **v0.2** (`mmap_tracked_bytes` field) | Use delta as proxy today |
+| FlashAttention tiling | **v0.2** (blocks real long-context inference) | Limit context ≤ 1024 with reference engine |
+
+**Minimum viable adoption on a Tuesday (v0.1):**
+
+A team that has hit silent OOM in llama.cpp, mistral.rs, or runNburn can adopt fitsproof-rs
+in under 10 minutes:
+
+```bash
+# Build or download
+cargo build --release
+
+# One-time: measure this machine
+./target/release/fitsproof probe
+
+# Every inference invocation: pre-flight gate
+./target/release/fitsproof admit \
+  --model /path/to/model.gguf \
+  --quant q4_k_m \
+  --context 4096 \
+  --budget-gb 14.4   # 90% of 16 GB RAM, to account for OS and activation overhead
+|| exit 2   # script stops here on refusal
+
+# Your existing inference call — unchanged
+llama-cli -m /path/to/model.gguf -c 4096 -n 200 -p "Your prompt here"
+```
+
+That is the complete v0.1 adoption.  No configuration file.  No new runtime.  No Python.
+No CUDA.  One line added before the inference call; one line of exit-code handling.
+
+---
+
+*Cycle 4 additions written 2026-09-29.  Sources: RESEARCH.md §47 (speculative decoding),
+§49 (FlashAttention-2), §52 (memmap2), §58 (mmap semantics), §59 (mistral.rs README),
+§60 (RustyLLM README), §61 (SecureLayer7 CVE advisory).*
