@@ -7,8 +7,8 @@ measure proof + degrade explicitly, in a single static binary, for the **4–8 G
 It does not claim speed or model coverage superiority — `COMPARISONS.md` names each
 tool and states where it beats us.
 
-Star counts and versions last updated 2026-09-29T10:30 UTC from GitHub REST API.
-Previous update: 2026-09-29T01:00 UTC (see RESEARCH.md cycle 3, pass 2 for history).
+Star counts and versions last updated 2026-09-29T19:00 UTC from GitHub REST API.
+Previous update: 2026-09-29T10:30 UTC (see RESEARCH.md cycle 4, pass 2 for history).
 
 ---
 
@@ -23,6 +23,8 @@ Previous update: 2026-09-29T01:00 UTC (see RESEARCH.md cycle 3, pass 2 for histo
 | **EricLBuehler/mistral.rs** | 7,722 | active releases (2026-09-29) | Production Rust inference on real models; GPU (CUDA/Metal) + CPU paths; Python bindings; broad model support; speculative decoding | No budget enforcement; no pre-flight admit; OOM-kills (documented unbounded-media-fetch CVE); GPU-primary; no static single binary for the target class |
 | **Grevix/aura** | 4 | no release (2026-09-03) | Rust-native; OS-level enforcement via cgroup v2 / Win32 Job Objects (kernel-kills child if limit exceeded); wraps llama-server for real model generation; auto-tunes context window; Windows support | Enforces at runtime (post-spawn, not pre-flight); no typed pre-flight refusal (exit 2 + named constraint); silent auto-tune has no typed degradation record; requires llama-server at runtime; no stress harness that generalizes offline |
 | **coderredlab/runNburn** | 28 | r17/v0.13.0 (2026-09-28) | Runs models exceeding RAM (222 GiB model on 32 GiB budget); CPU/CUDA/Metal/Vulkan; Android; OpenAI-compat server; correctness-first; active development | Runtime memory policy (mmap residency cache), not pre-flight typed refusal; no `admit` exiting 2 before loading begins; no typed degradation record; no allocator_peak vs VmHWM delta; no portable stress harness; not a single static binary |
+| **cool-japan/oxillama** | 38 | v0.1.4 (2026-08-17) | Pure Rust LLM engine (zero FFI); 25 architectures including MoE; all mainstream quant formats; 3,751 tests; WASM + GPU backends | No budget enforcement; no admit/refuse; no stress harness; inference engine, not a contract layer |
+| **arya51-ai/ignis** | 4 | no release (2026-09-29) | Rust GGUF engine with SSA tensor-graph compiler; liveness-based activation memory planner (76% activation reduction on Qwen2.5-0.5B) | Compiler-level activation planning only; no process-budget contract; no admit/refuse/stress; Apple Silicon primary |
 | **SimonWaldherr/RustyLLM** | 7 | active (2026-09-19) | Educational Rust GGUF runner; zero-copy mmap weights; MCP server (inference tools: generate/chat/embed/models); OpenAI + Ollama + LM Studio compat | No memory budget enforcement at all; MCP server exposes inference tools, not resource contract tools; no admit/refuse; primarily Apple Silicon/Metal |
 
 ---
@@ -32,6 +34,7 @@ Previous update: 2026-09-29T01:00 UTC (see RESEARCH.md cycle 3, pass 2 for histo
 | Tool | Stars | Version | What it does better | Where fitsproof-rs differs |
 |------|-------|---------|---------------------|----------------------------|
 | **ridgepoint** | 1 (GitHub) | 0.1.2 PyPI (2026-09-08) | Best prediction accuracy (~1% MAPE on A100/H100); engine-aware VRAM (GQA/MLA correct to the byte); per-field `calibrated` flags | GPU-only (A100/H100); Python + pip; prediction only — no enforcement, no ceiling, no stress harness |
+| **AlexsJones/llmfit** | 37,300 | v0.9.x (2026-09-29) | Rust; largest sizer by star count; 100+ database models; dynamic quant walk (Q8_0→Q2_K); MoE active-expert accounting; REST API server; community calibration loop; on-device bandwidth measurement | Model selector from embedded database — cannot read an arbitrary local GGUF; recommendation output only (always exits 0); no typed exit-2 budget refusal; no stress harness; no allocator_peak vs VmHWM delta |
 | **llm-inference-calculator** | 21 | no release (2026-09-28) | Two-phase roofline (prefill TTFT compute-bound, decode TPOT bandwidth-bound); MoE expert coverage | Prediction only; Python; no enforcement; no static binary |
 | **llm-roofline** | 0 | no release (2026-06-20) | Minimal, readable decode throughput floor | Abandoned (0 stars); no enforcement; no KV term; no quantization-aware sizing |
 | **hardware-aware-llm-runtime** | 0 | no release (2026-06-25) | Hardware-calibrated roofline; analytical optimal batch prediction | Abandoned (0 stars); prediction only |
@@ -73,4 +76,4 @@ That combination on the **4–8 GB VRAM / 16–32 GB RAM** hardware class is the
 
 ---
 
-*Data source: GitHub REST API (unauthenticated) + PyPI JSON API, 2026-09-29T10:30 UTC.*
+*Data source: GitHub REST API (unauthenticated) + PyPI JSON API, 2026-09-29T19:00 UTC.*

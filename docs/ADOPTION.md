@@ -1082,3 +1082,279 @@ No CUDA.  One line added before the inference call; one line of exit-code handli
 *Cycle 4 additions written 2026-09-29.  Sources: RESEARCH.md §47 (speculative decoding),
 §49 (FlashAttention-2), §52 (memmap2), §58 (mmap semantics), §59 (mistral.rs README),
 §60 (RustyLLM README), §61 (SecureLayer7 CVE advisory).*
+
+---
+
+## 14. Adopting alongside llmfit — the composite workflow (cycle 5 additions)
+
+**AlexsJones/llmfit** (37,300★, Rust, MIT, last push 2026-09-29) is the largest Rust LLM
+sizer in the field by a wide margin.  It overlaps with fitsproof-rs in the consumer hardware
+class and on bandwidth measurement.  Understanding where each tool fits prevents redundant
+effort.
+
+### What llmfit does that fitsproof-rs does not
+
+- **Model discovery from a database of 100+ known models.** `llmfit recommend --use-case
+  coding` scores and ranks models from HuggingFace metadata embedded at compile time.
+  fitsproof-rs works from a GGUF file you already have — it is a gate, not a selector.
+
+- **MoE active-expert accounting.** llmfit correctly distinguishes active vs total parameters
+  for MoE models (e.g. Mixtral 8x7B: ~12.9B active out of 46.7B total → ~6.6 GB VRAM, not
+  23.9 GB).  fitsproof-rs v0.1 does not model MoE expert structure (filed as OQ-C5-2; v0.2
+  fix path: read `expert_count` from GGUF KV and multiply FFN bytes by E).
+
+- **Community calibration loop.** Measured tok/s values contributed by users replace formula
+  estimates in the ranking table.  fitsproof-rs's `probe` command measures this machine only.
+
+### What fitsproof-rs does that llmfit does not
+
+- **Reads an arbitrary local GGUF file.** `fitsproof plan --model /path/to/my-finetune.gguf
+  --budget-gb 4` works for any GGUF, including custom fine-tunes not in any database.
+  llmfit's estimates are database-driven; unknown models fall back to a generic formula.
+
+- **Exits non-zero on budget violation.** `fitsproof admit --budget-gb N` exits 2 with the
+  binding constraint named.  `llmfit recommend --json` always exits 0; the CI must parse JSON
+  to find `"Too Tight"` verdicts.  In a CI pipeline, `|| exit 2` cannot be appended to
+  `llmfit`; it can to `fitsproof admit`.
+
+- **Typed degradation records.** llmfit's dynamic quant walk (Q8_0 → Q2_K → ...) chooses a
+  quant silently — the chosen quant appears in the output table but there is no typed struct
+  a CI step can assert on.  fitsproof-rs's `FitsWithDegradation` carries a structured
+  `degradation_steps` vector; a missing record is a test failure.
+
+- **Portable offline stress harness.** `fitsproof stress` runs ≥20 configs offline, with no
+  engine, no GPU, no subprocess.  There is no llmfit equivalent.
+
+### The composite workflow (recommended for CI pipelines)
+
+```bash
+#!/usr/bin/env bash
+# Step 1 — llmfit: which model family fits my hardware? (database-driven recommendation)
+llmfit recommend --use-case coding --json | jq -r '.models[0].name'
+# → "Qwen3-7B-Q4_K_M"
+
+# Step 2 — fitsproof: does this specific GGUF meet the CI budget? (contract enforcement)
+fitsproof admit \
+  --model ~/models/Qwen3-7B-Instruct-Q4_K_M.gguf \
+  --quant q4_k_m \
+  --context 4096 \
+  --budget-gb 14.4     # 90% of 16 GB RAM
+|| { echo "REFUSED: see binding constraint above"; exit 2; }
+
+# Step 3 — your inference call (unchanged)
+llama-cli -m ~/models/Qwen3-7B-Instruct-Q4_K_M.gguf -c 4096 -p "Your prompt"
+```
+
+llmfit handles discovery; fitsproof-rs handles the contract gate.  Neither replaces the other.
+
+### Operational note: llmfit's bpw formula
+
+llmfit uses `0.5 bytes/param` for Q4_K_M (same as fitsproof-rs v0.1).  This is the tied-
+embedding formula.  For models with untied embeddings (Llama-3.1-8B and later), both tools
+underestimate weight bytes by ~1 GB (see §14.1 below).
+
+---
+
+## 14.1 — Untied embedding correction: the v0.1 safety gap (cycle 5 additions)
+
+**Discovered in cycle 5 pass 1 (source 64 — Press & Wolf 2017).**
+
+Some models store the input embedding matrix (`token_embd.weight`) and the output LM head
+(`output.weight`) as separate tensors in the GGUF file.  This is called **untied embeddings**.
+Both tensors must be loaded simultaneously.
+
+**Models with untied embeddings (incomplete list):**
+- Llama-3.1-8B, Llama-3.2-3B, Llama-3.2-1B, Llama-3.3-70B
+- Falcon-7B, Falcon-40B
+- Some Mistral variants
+
+**Models with tied embeddings (output = input^T, stored once):**
+- Qwen3 family (all sizes)
+- Llama-2 family (tied)
+- Gemma family
+- Phi-3 family
+
+**The risk for untied models:**
+
+For Llama-3.1-8B (V = 128,256, d_model = 4096, Q4_K_M):
+
+```
+tied formula:   output.weight not counted
+  weight prediction = ~4.0 GB
+  admit at --budget-gb 5 → ADMITTED
+
+actual (untied, output.weight fp16):
+  output.weight = 128,256 × 4,096 × 2 = 1.05 GB
+  real weight bytes = ~5.0 GB
+  real peak = ~5.0 GB + KV + runtime
+  admit at --budget-gb 5 → actual OOM
+```
+
+**Workaround until v0.2:**
+
+For models you know are untied, subtract 1 GB from your `--budget-gb` threshold:
+
+```bash
+# For Llama-3.1-8B (untied, ~1 GB output.weight overhead):
+fitsproof admit \
+  --model llama-3.1-8b-instruct-q4_k_m.gguf \
+  --quant q4_k_m --context 4096 \
+  --budget-gb 14.4     # instead of 15.4 — subtract ~1 GB output.weight overhead
+```
+
+**How to check if your model is untied:**
+
+```bash
+# The GGUF tensor_info section lists all tensors.
+# A model with output.weight in the list is untied.
+# Quick check: file size for 7B Q4_K_M
+# Tied (e.g. Qwen3-7B Q4_K_M):   ~4.0 GB on disk
+# Untied (e.g. Llama-3.1-8B Q4_K_M): ~4.7 GB on disk
+# Difference = output.weight ≈ 0.6–1.1 GB depending on vocab size
+
+ls -lh ~/models/your-model.gguf
+# If file is >1 GB larger than expected for the parameter count, it is likely untied.
+```
+
+**v0.2 fix:** Read `output.weight` presence from GGUF `tensor_info`.  If present, add its
+byte count (V × d_model × bpe) explicitly.  This is the correct approach; the conservative
+workaround (always count both copies) is also safe but may over-refuse for tied models.
+
+---
+
+## 14.2 — MoE models: the expert multiplier (cycle 5 additions)
+
+**Discovered in cycle 5 pass 1 (sources 65, 70, 71 — Switch Transformer, MoE memory efficiency, OLMoE).**
+
+Mixture-of-Experts (MoE) models (DeepSeek-V3, Mixtral, OLMoE, Phi-3.5-MoE) have `E` expert
+FFN sub-networks per layer, only `k` of which are active per token, but **all must be loaded
+into DRAM** because routing happens at token time.
+
+**The v0.1 underestimation:**
+
+fitsproof-rs v0.1 `weight_bytes("q4_k_m", n_params)` applies the quant uniformly to all
+parameters.  For a MoE model with total parameter count `n_params`, this gives approximately
+the right byte count — but only by coincidence: most MoE models quote the total parameter
+count including all expert copies.
+
+**The concrete risk:**
+
+llmfit (source 74) correctly uses active-expert fractions for its database models.  If you
+have a MoE GGUF file and run `fitsproof plan`, the byte prediction is based on the quant
+× total-params formula, which should still be approximately correct because GGUF stores all
+expert weights and the file size reflects that.  The GGUF `tensor_count` will be high
+(including all expert tensors), and the plan() output reads from the file metadata.
+
+**What to check:**
+
+```bash
+fitsproof plan --model your-moe.gguf --quant q4_k_m --context 4096 --budget-gb 16
+```
+
+If the predicted_peak seems far below the on-disk GGUF size, this may indicate the
+architecture metadata (n_params) is the active-expert count rather than the total count.
+In that case, multiply `predicted_peak` by `num_experts / num_active_experts` as a
+conservative correction.
+
+**v0.2 fix:** Read `expert_count` and `expert_used_count` from GGUF KV metadata; include
+all expert FFN bytes in `weight_bytes()` rather than relying on the parameter count alone.
+GGUF keys: `[arch].expert_count` and `[arch].expert_used_count`.
+
+---
+
+## 14.3 — Updated non-adoption reason (cycle 5)
+
+The v0.1 adoption blocker (§5, updated in §10) was primarily that `verify` runs on the
+reference bundle, not real models.  In §10, the admission picture improved with
+`FitsproofClient::guard()` and the `serve`/`mcp`/`pareto` stubs having working dispatch code.
+
+The cycle 5 analysis adds a second, more concrete blocker:
+
+**For untied-embedding models (Llama-3.1-8B and similar): `admit()` can give a false
+positive at budgets near the model's real weight bytes.**
+
+A developer running Llama-3.1-8B at 4096 context on a 6 GB budget:
+
+```bash
+fitsproof admit --model llama-3.1-8b.gguf --quant q4_k_m --context 4096 --budget-gb 6
+# v0.1: ADMITTED: ~5.2 GB predicted peak <= 6.0 GB budget (margin: 820 MB)
+# actual: 5.2 GB weights (with output.weight) + 0.47 GB KV + 0.06 GB runtime = 5.73 GB
+# → fits (barely). But if the user has 16 GB RAM and uses --budget-gb 8 for a different
+# model that is actually 6.5 GB with output.weight, they get a false ADMITTED → OOM.
+```
+
+**The mitigation rule until v0.2:**
+
+- Check your model's GGUF file size.
+- For any 7B+ model: if the GGUF file is > 4.5 GB at Q4_K_M, it likely has untied embeddings.
+- Use 85% of your actual RAM as `--budget-gb` (not 90%) to absorb both OS overhead and
+  untied embedding uncertainty.
+
+| Model size | GGUF size at Q4_K_M (tied) | GGUF size at Q4_K_M (untied) |
+|---|---|---|
+| 0.5B | ~0.3 GB | N/A (typically tied) |
+| 1.7B | ~1.1 GB | ~1.2 GB |
+| 7B | ~4.0 GB | ~4.7 GB (+0.7 GB output.weight) |
+| 8B | ~4.5 GB | ~5.2 GB (+0.7 GB output.weight) |
+| 70B | ~40 GB | ~42 GB (+2 GB output.weight) |
+
+---
+
+## 15. Updated minimum viable adoption (cycle 5)
+
+The cycle 4 minimum viable adoption recipe (§13, bottom table) remains the starting point.
+Cycle 5 additions are two safety-net rules that protect against the newly-documented v0.1 gaps:
+
+**Safety rule 1: use 85% of RAM as budget (not 90%)**
+
+This absorbs both OS overhead and the untied-embedding uncertainty simultaneously:
+```bash
+# For a 16 GB machine:
+# Old recommendation: --budget-gb 14.4  (90%)
+# New recommendation: --budget-gb 13.6  (85%)
+```
+
+The extra 5% (0.8 GB) covers the `output.weight` term for most 7B models.  For 1.7B models
+(where output.weight ≈ 0.1 GB), the 90% threshold remains safe.
+
+**Safety rule 2: for MoE models, verify the GGUF file size directly**
+
+```bash
+# Check GGUF file size against predicted peak:
+ls -lh /path/to/moe-model.gguf
+# If file size > fitsproof plan prediction × 1.3, the model has significant
+# overhead not captured by the n_params formula (likely: expert tensors or untied embeddings).
+# In that case, use file_size_gb + 1.5 GB (KV + runtime) as your effective budget requirement.
+```
+
+**Full cycle 5 minimum viable adoption (single GGUF, CI gate):**
+
+```bash
+# Build or download
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo build --release --manifest-path /path/to/fitsproof-rs/Cargo.toml
+FITSPROOF=/path/to/fitsproof-rs/target/release/fitsproof
+
+# One-time: measure this machine
+$FITSPROOF probe
+
+# Pre-flight gate (use 85% of RAM as budget)
+$FITSPROOF admit \
+  --model /path/to/model.gguf \
+  --quant q4_k_m \
+  --context 4096 \
+  --budget-gb 13.6   # 85% of 16 GB; adjust for your hardware
+|| { echo "REFUSED: see binding constraint above"; exit 2; }
+
+# Your existing inference call — unchanged
+llama-cli -m /path/to/model.gguf -c 4096 -n 200 -p "Your prompt"
+```
+
+No configuration file.  No new runtime.  No Python.  No CUDA.  Two lines added before the
+inference call.  Works for any GGUF model, including custom fine-tunes not in any database.
+
+---
+
+*Cycle 5 additions written 2026-09-29.  Sources: RESEARCH.md §64 (Press & Wolf 2017,
+weight tying), §65 (Fedus et al. 2021, Switch Transformer MoE), §70 (arXiv:2607.08780,
+MoE memory-efficient inference), §71 (arXiv:2409.02060, OLMoE), §74 (llmfit README).*
