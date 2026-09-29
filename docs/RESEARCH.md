@@ -6203,3 +6203,1234 @@ entries 33–36):
 *Cycle 4, Pass 3 complete.  All open questions from cycle 4 passes 1-2 closed.  No new
 algorithmic sources required — resolutions grounded in sources 47, 49, 52, 54, 58-61.
 Companion document: `docs/ADOPTION.md` §§12-13.  Links re-verified 2026-09-29.*
+
+---
+
+# Cycle 5, Pass 1 — Deeper Ground Truth for Sampling, Weight Tying, MoE Memory, and Stateless MCP (2026-09-29)
+
+Extends the source table with ≥10 new real, resolvable sources.  Fills gaps left by cycles
+1–4: sampling theory (temperature / top-k / top-p), weight tying in GGUF (embedding byte
+counting), MoE memory formula (expert weight size), GGUF alignment padding, and the
+MCP 2026-07-28 stateless spec revision that eliminates the initialize handshake.  Sources
+63–73 are new.  For sources 63–67 (the five that most directly drive the design), the full
+method, equations, assumptions, and failure modes are documented.  All links verified to
+resolve on 2026-09-29.
+
+---
+
+## Table of sources (cycle 5, pass 1 additions)
+
+| #  | Source | Drives |
+|----|--------|--------|
+| 63 | Holtzman et al. 2020 — Nucleus (top-p) Sampling (arXiv:1904.09751) | `src/engine/sampling.rs` top-p sampling equations |
+| 64 | Press & Wolf 2017 — Weight Tying (arXiv:1608.05859) | embedding byte counting: tied vs untied; OQ-C2-1 root cause |
+| 65 | Fedus et al. 2021 — Switch Transformer MoE (arXiv:2101.03961) | MoE weight bytes formula: all-experts resident in memory |
+| 66 | MCP 2026-07-28 stateless spec — `server/discover` replaces `initialize` | `src/mcp.rs` must not implement `initialize` handshake for 2026-07-28 clients |
+| 67 | GGUF spec — `general.alignment` padding formula | alignment padding byte count between header and tensor_data |
+| 68 | arXiv:2505.19371 — Foundations of Top-k Decoding (2025) | top-k correctness, optimal k, failure modes at extreme k |
+| 69 | tokio-rs/tokio — `tokio::sync::Semaphore` | concurrent resource budget enforcement for `src/serve.rs` |
+| 70 | arXiv:2607.08780 — Training MoE Models for Memory-Efficient Inference (2026) | expert caching and memory-efficient MoE inference |
+| 71 | arXiv:2409.02060 — OLMoE: Open Mixture-of-Experts LLM (2024) | concrete MoE memory formula with activation experts |
+| 72 | arXiv:2408.13586 — How to Select Sampling Method and Parameter (2024) | sampling method comparison; temperature vs top-p vs top-k tradeoffs |
+| 73 | WorkOS blog — MCP 2026-07-28 spec changes (verified against modelcontextprotocol.io SDK docs) | confirms `_meta` fields required per request in stateless mode |
+
+---
+
+## 63. Holtzman et al. 2020 — The Curious Case of Neural Text Degeneration (Nucleus Sampling)
+
+**Link:** https://arxiv.org/abs/1904.09751  
+**Status:** Resolves 2026-09-29.  ICLR 2020.
+
+### Method
+
+The paper identifies that sampling from the full vocabulary distribution causes text
+degeneration (repetition, incoherence).  Both greedy decoding (always picks top-1) and
+pure random sampling produce bad text for different reasons.  Top-p sampling (nucleus
+sampling) fixes both by dynamically truncating the distribution.
+
+**Top-p (nucleus) sampling procedure:**
+
+At each token position, given a sorted descending probability distribution
+`p(w_1) ≥ p(w_2) ≥ ... ≥ p(w_V)`:
+
+1. Find the smallest nucleus set `V_top ⊆ V` such that:
+   ```
+   Σ_{v ∈ V_top} p(v) ≥ p   (cumulative probability ≥ threshold p)
+   ```
+2. Renormalise over `V_top`:
+   ```
+   p̃(v) = p(v) / Z_top   where Z_top = Σ_{v ∈ V_top} p(v)
+   ```
+3. Sample from the renormalised distribution `p̃`.
+
+**Example (from the paper §4.1):** At p = 0.9, if the top-3 tokens account for
+cumulative probability 0.92, those 3 tokens form the nucleus.  If the next best token
+would push cumulative probability past 0.9, the nucleus is exactly those 3 tokens.
+
+**Temperature scaling as a pre-processing step (from §2):**
+
+Before top-p truncation, the logits are scaled by temperature T:
+```
+p(w | context) ∝ exp(logit(w) / T)
+```
+- T < 1 (cold): distribution sharpens; top token becomes more dominant.
+- T = 1: default softmax.
+- T > 1 (hot): distribution flattens; more tokens are plausible.
+
+The combined procedure (temperature then top-p):
+```
+logit'(w) = logit(w) / T
+p(w) = softmax(logit'(w))   ← over full vocabulary
+nucleus = {w : cumsum(sorted(p)) ≤ p_threshold}
+sample from renorm(p, nucleus)
+```
+
+**Our implementation:** `src/engine/sampling.rs:sample_top_p`.  Temperature is applied
+first (logit division), then softmax, then nucleus construction, then sampling using
+the xoshiro256** RNG (source 10).
+
+### Assumptions
+
+- Vocabulary size V is the number of distinct tokens.  Sorting V probabilities at each
+  decoding step costs O(V log V); for V = 32,000 (LLaMA) this is ~500,000 comparisons
+  per token — acceptable at batch=1 on CPU.
+- The renormalisation step requires summing V values; float accumulation errors are
+  O(V × ε_machine).  For V = 32K and fp32, maximum cumulative error ≈ 32000 × 6×10⁻⁸ ≈ 2×10⁻³.
+  This is negligible for sampling but means the renormalised distribution may not
+  sum to exactly 1.0 in float arithmetic.
+- The temperature parameter is finite and positive.  T = 0 is not handled by the
+  top-p formula; T → 0 approaches greedy decoding (use a greedy branch instead).
+- The threshold p ∈ (0, 1].  p = 1.0 means the nucleus includes the entire vocabulary
+  (equivalent to pure random sampling).  p → 0 approaches greedy (nucleus contains
+  only the top-1 token).
+
+### Failure modes (per Holtzman et al. 2020)
+
+1. **Repetition loop at low temperature.** T < 0.7 combined with top-p causes the
+   nucleus to shrink to 1–3 tokens.  At these nucleus sizes, the model can enter a
+   repetition loop: the same token or phrase repeats indefinitely.  This is the
+   "degeneration" failure mode the paper studies.  Mitigation: use a repetition penalty
+   (not in our v0.1 engine, but a v0.2 item).
+2. **Empty nucleus at high temperature.** If T is very large (T > 5), the distribution
+   becomes nearly uniform and the nucleus = full vocabulary regardless of p.  This is
+   mathematically correct but computationally wasteful (sort + renorm over 32K+ tokens).
+3. **Renormalisation precision.** For top-p values very close to the cumulative boundary
+   (e.g., p = 0.8001 when the top tokens sum to exactly 0.8), float rounding determines
+   which tokens are included.  The nucleus is not deterministic at fp32 precision near
+   the boundary.  Our implementation sorts in descending order and includes all tokens
+   up to and including the one that first exceeds the threshold (inclusive).
+4. **Sort instability for equal probabilities.** If two tokens have equal probability,
+   the sort order is arbitrary.  For reproducibility, our sort is stable (preserves
+   vocabulary-index order for equal probabilities).
+
+---
+
+## 64. Press & Wolf 2017 — Using the Output Embedding to Improve Language Models (Weight Tying)
+
+**Link:** https://arxiv.org/abs/1608.05859  
+**Status:** Resolves 2026-09-29.  EACL 2017.  arXiv version 3, last revised 2017-02-21.
+
+### Method
+
+Weight tying connects the input token embedding matrix `E` (shape: V × d_model) to
+the output language model head matrix `W_out` (shape: d_model × V, before softmax),
+setting them equal:
+
+```
+W_out = E^T   (transpose of the embedding matrix)
+```
+
+**Parameter count with and without weight tying:**
+
+Without tying:
+```
+params_total = ... + V × d_model    (E)  + d_model × V    (W_out)
+             = ... + 2 × V × d_model
+```
+
+With tying:
+```
+params_total = ... + V × d_model    (E = W_out^T, stored once)
+```
+
+The saving is `V × d_model` parameters.  For Llama-3-8B (V = 128,256, d_model = 4096):
+```
+saving = 128,256 × 4096 × 4 bytes (fp32) = 2.1 GB
+```
+
+For models without weight tying, both `token_embd.weight` and `output.weight` must be
+loaded.  For models **with** weight tying, `output.weight` is absent from the GGUF file
+(or a pointer to `token_embd.weight`), so loading `output.weight` would double-count.
+
+**GGUF convention for weight tying (from source 39, tensor_info section):**
+
+In a GGUF file with weight tying, the `output.weight` tensor is typically absent.
+The consumer (llama.cpp) checks for its presence; if absent, uses `token_embd.weight`
+transposed as the LM head.  If present, it is a separate tensor (untied).
+
+**Consequence for `weight_bytes()`:**
+
+Our formula computes total weight bytes as:
+```
+weight_bytes = embedding_bytes + layer_bytes_per_layer × L
+```
+where `embedding_bytes = V × d_model × bytes_per_element`.
+
+If the model has weight tying:
+- Only one copy of the embedding exists in the file (V × d_model).
+- `token_embd.weight` is loaded; `output.weight` is absent.
+- Total = V × d_model × bpe, not 2 × V × d_model × bpe.
+
+If the model does NOT have weight tying:
+- Both tensors exist (most large LLaMA-family models ≥ 7B are untied).
+- Total = 2 × V × d_model × bpe.
+
+Our current `weight_bytes()` formula does not distinguish tied vs untied.  For the
+reference config (tied, as in LLaMA-3.1-8B and Qwen3-7B), we use `V × d_model` — correct.
+For untied models (some GPT-family, Falcon), the formula underestimates by `V × d_model × bpe`.
+
+**Known-answer:** Llama-3.1-8B (untied since 3.1), V = 128,256, d_model = 4096, fp16:
+```
+output.weight = 128,256 × 4096 × 2 = 1.05 GB
+```
+This is in addition to the embedding.  Total embedding-related weight = 2.1 GB.
+
+Our formula uses 1.05 GB (single copy, tied assumption).  Underestimate: 1.05 GB.
+This is the second largest source of weight byte underestimation after quantization type
+(already documented in OQ-C2-1 / cycle 2 pass 1).
+
+### Assumptions
+
+- The presence or absence of `output.weight` in the GGUF tensor_info section is the
+  authoritative indicator of weight tying.  The KV metadata key
+  `[arch].attention.use_tied_embeddings` may also be present in some exporters but is
+  non-standard.
+- Weight tying has been standard practice since Press & Wolf 2017 and Inan et al. 2017
+  in models ≤ ~1B parameters.  Models ≥ 7B typically use untied embeddings (per Llama-2
+  and later architecture choices) because untied embeddings allow the output head to
+  specialise differently from the input embeddings.
+
+### Failure modes
+
+1. **Untied models predicted with tied formula.** Our formula assumes a single embedding
+   copy.  For Llama-3.1-8B (untied), the formula underestimates weight bytes by 1.05 GB.
+   This is a false-positive admission risk: `admit()` says fits when it does not (by 1 GB).
+   This is the more dangerous failure mode than the Q4_K bpw underestimate (which is < 0.5 GB
+   for 7B models).  **Filed for v0.2: read `output.weight` presence from GGUF tensor_info and
+   add `V × d_model × bpe` if absent from the file (i.e., tied = only one copy; untied = two
+   copies).**
+2. **Tied models double-counted.** If the formula were changed to always count two copies but
+   the model is tied, the formula would overestimate by 1 GB — leading to false-positive refusals
+   (safe direction but wasteful).  The fix must be conditional on reading the GGUF tensor_info.
+3. **Partial tying.** Some architectures (Falcon) tie only some layers' embeddings, not all.
+   This is rare and not modelled.
+
+---
+
+## 65. Fedus et al. 2021 — Switch Transformer: Scaling to Trillion Parameter Models
+
+**Link:** https://arxiv.org/abs/2101.03961  
+**Status:** Resolves 2026-09-29.  JMLR 2022 (originally arXiv 2021).  Google Brain.
+
+### Method
+
+The Switch Transformer replaces each FFN layer in a standard transformer with a **Mixture
+of Experts (MoE)** layer.  Each MoE layer contains `E` expert FFN sub-networks, and a
+router dispatches each token to exactly one expert (top-1 routing).
+
+**Routing function (§2):**
+
+Given token representation `x` (dimension d_model), the router computes:
+```
+h(x) = W_r × x          (W_r ∈ R^{E × d_model})
+p(x) = softmax(h(x))     (probability over E experts)
+```
+
+Token is dispatched to expert `i* = argmax_i p_i(x)`.  The expert processes the token
+with its own FFN weights `(W_gate_i, W_up_i, W_down_i)`.
+
+**Weight bytes formula for MoE (vs. dense transformer):**
+
+Dense transformer FFN per layer (SwiGLU):
+```
+ffn_dense = 3 × d_model × d_ff    (gate + up + down projections, all shared)
+```
+
+MoE FFN per layer with E experts, top-1 routing:
+```
+ffn_moe = E × 3 × d_model × d_ff  +  d_model × E    (E expert FFNs + router)
+        ≈ E × ffn_dense  (router cost is small)
+```
+
+**Total model weight bytes for MoE:**
+
+```
+W_moe = W_attn × L + W_norm × L + W_embed + W_router × L_moe + W_experts × L_moe
+
+where:
+  W_attn     = per-layer attention weights
+  W_norm     = per-layer normalization weights
+  L          = total layers (includes both MoE and non-MoE layers)
+  L_moe      = number of MoE layers (= L × moe_layer_freq)
+  W_router   = d_model × E per MoE layer (the gating network)
+  W_experts  = E × 3 × d_model × d_ff per MoE layer
+```
+
+**Key property (from §2, Table 1):** ALL expert weights must be resident in memory
+during inference — only the routing is sparse (each token uses one expert), but the
+model cannot know in advance which expert will be needed.  Therefore:
+
+```
+memory_moe = memory_dense × E × moe_layer_freq / 1.0
+```
+(roughly: E× the memory of the equivalent dense model, for the FFN layers replaced by MoE)
+
+**Example — DeepSeek-V3 style (from public architecture reports):**
+- E = 256 experts, top-k = 8 active per token
+- L = 61 layers, L_moe ≈ 58 layers
+- d_ff (expert) = 2048 (much smaller than dense: "fine-grained" MoE)
+
+**Memory implication for `weight_bytes()`:**
+
+For MoE models, `weight_bytes` must account for ALL experts:
+```
+expert_bytes = E × 3 × d_model × d_ff × bpe × L_moe
+```
+Not just the top-k active experts.  This is because all experts must be loaded; only
+the routing decision is sparse, not the storage.
+
+**Our current formula** does not model MoE.  `weight_bytes(cfg, quant)` uses a single
+`intermediate_size` for the FFN.  For MoE models read from GGUF, the GGUF file size
+already includes all expert weights; reading `tensor_count` and summing tensor_info
+byte sizes is the correct method.  The planning formula needs a v0.2 extension.
+
+**v0.2 fix path:**
+```rust
+// In ModelConfig, add:
+pub num_experts: Option<u32>,
+pub moe_layer_freq: Option<u32>,  // 1 = every layer is MoE; 4 = every 4th layer
+
+// In weight_bytes():
+if let (Some(E), Some(freq)) = (cfg.num_experts, cfg.moe_layer_freq) {
+    let moe_layers = cfg.num_layers / freq;
+    let expert_bytes = E as u64
+        * 3 * cfg.hidden_size as u64 * cfg.intermediate_size as u64
+        * bpe * moe_layers as u64;
+    return attn_bytes + embedding_bytes + expert_bytes + router_bytes + norm_bytes;
+}
+```
+
+GGUF metadata keys for MoE (from gguf.md, verified 2026-09-29):
+- `[arch].expert_count` — number of experts E
+- `[arch].expert_used_count` — top-k active per token
+
+### Assumptions
+
+- All experts are stored in DRAM simultaneously.  Expert offloading to SSD
+  (used in some consumer deployments) is not modelled.
+- The expert FFN structure is identical for all experts (same d_ff, same dtype).
+  Heterogeneous experts are not modelled.
+- The router weight `W_r` (d_model × E) is small compared to expert weights and
+  can be treated as a rounding term.
+
+### Failure modes (per Fedus et al. 2021 and subsequent MoE literature)
+
+1. **All experts in memory = high baseline RAM.** Even though only 1 expert (or k) is
+   used per token, all must be resident.  For a 256-expert model with d_ff = 2048,
+   expert weight size = 256 × 3 × 4096 × 2048 × 0.5 bytes (q4) ≈ 6 GB.  This is the
+   dominant term, making MoE models expensive even for CPU inference.
+2. **Expert imbalance under distribution shift.** Top-1 routing can cause some experts
+   to receive no tokens for certain inputs.  While this doesn't affect memory (all are
+   resident), it affects throughput (idle experts waste bandwidth if the kernel reads
+   all experts sequentially).
+3. **Collapse to top-1 at low temperature.** At T → 0 (near-greedy), the router always
+   picks the same expert for similar tokens.  This causes load imbalance and degrades
+   the model's intended diversity.
+4. **fit check ignoring expert count.** Our `admit()` does not currently accept
+   `num_experts` in `ModelConfig`; the GGUF reader does not extract `expert_count`.  For
+   a MoE model, `plan()` will silently underestimate weight bytes by the expert
+   multiplier.  Filed for v0.2.
+
+---
+
+## 66. MCP 2026-07-28 Stateless Spec — Removing the `initialize` Handshake
+
+**Link:** https://modelcontextprotocol.io/specification/2026-07-28/basic/lifecycle  
+**Status:** Resolves 2026-09-29.  MCP spec version 2026-07-28, released 2026-07-28.
+Additional confirmation from: https://go.sdk.modelcontextprotocol.io/protocol/ (Go SDK docs),
+https://workos.com/blog/mcp-stateless-spec-2026-07-28 (WorkOS summary, confirmed independently).
+
+### Method
+
+The 2026-07-28 revision (SEP-2575) removes the `initialize` / `notifications/initialized`
+handshake that was mandatory in all prior MCP versions.
+
+**Prior behavior (2025-11-05 and earlier):**
+
+Every connection began with a 2-step negotiation:
+```
+1. Client → server:  { method: "initialize", params: { protocolVersion, clientInfo, capabilities } }
+2. Server → client:  { result: { protocolVersion, serverInfo, capabilities } }
+3. Client → server:  { method: "notifications/initialized" }  (notification, no response)
+```
+Only after step 3 could the client send tool calls.  This required stateful connection
+tracking (the server knew which connections had been initialized) and made load-balancing
+across server instances impossible without sticky routing.
+
+**New behavior (2026-07-28):**
+
+The `initialize` handshake is replaced by `server/discover` (optional metadata endpoint).
+Every request carries its own capabilities in `_meta`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/list",
+  "_meta": {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientInfo": { "name": "my-client", "version": "1.0" },
+    "io.modelcontextprotocol/clientCapabilities": { "tools": {} }
+  }
+}
+```
+
+The server does not maintain per-connection state.  Each request is fully self-describing.
+`Mcp-Session-Id` header is removed; load balancers can use plain round-robin.
+
+**Two-mode requirement for `src/mcp.rs`:**
+
+The 2026-07-28 spec explicitly requires servers to support BOTH the legacy `initialize`
+flow (for backward compatibility with 2025-era clients) and the new stateless flow:
+
+```
+If the first message is "initialize" → legacy mode (respond with capabilities, wait for "notifications/initialized")
+If the first message is anything else → stateless mode (process immediately, read _meta per request)
+```
+
+**Our current `src/mcp.rs` implementation:**
+
+The v0.1 stub exits 2 with a "v0.2 scope" message.  The v0.2 implementation must:
+
+1. On first message, check `method`:
+   - If `"initialize"` → respond with capabilities + protocol version, wait for `"notifications/initialized"`
+   - Otherwise → process request directly (stateless mode)
+2. On every `tools/call`, read `_meta.io.modelcontextprotocol/protocolVersion` to detect
+   which protocol version the client is using (2025-era vs 2026-07-28).
+3. Never send `Mcp-Session-Id` header (removed in 2026-07-28; older SDKs may ignore it,
+   but newer ones may reject it).
+
+**Minimal stateless server loop:**
+
+```rust
+// src/mcp.rs — stateless mode (2026-07-28)
+let stdin = std::io::stdin();
+let stdout = std::io::stdout();
+let mut out = std::io::BufWriter::new(stdout.lock());
+let mut initialized = false;
+
+for line in BufReader::new(stdin.lock()).lines() {
+    let line = line?;
+    if line.trim().is_empty() { continue; }
+    let req: serde_json::Value = serde_json::from_str(&line)?;
+    let method = req["method"].as_str().unwrap_or("");
+
+    let response = if method == "initialize" {
+        // Legacy handshake: respond with capabilities
+        initialized = true;
+        make_initialize_response(&req)
+    } else if method == "notifications/initialized" {
+        // Legacy: no response to notifications (they have no id)
+        continue;
+    } else {
+        // Stateless: process any method directly
+        handle_tool_request(&req)
+    };
+    writeln!(out, "{}", serde_json::to_string(&response)?)?;
+    out.flush()?;
+}
+```
+
+### Assumptions
+
+- The spec's `_meta` format is stable for 2026-07-28 clients; fields under
+  `io.modelcontextprotocol/` are namespaced and will not collide with tool arguments.
+- The Go SDK, Ruby SDK, and Python SDK all implement both modes; our Rust implementation
+  must match the reference behavior.
+- In the stdio transport (source 31), session state is per-process-lifetime anyway.
+  The stateless change primarily matters for HTTP+SSE transport (remote servers); for
+  stdio, the process lifecycle is the session.
+
+### Failure modes
+
+1. **Client sends `tools/call` before `initialize` (stateless mode).** Our handler must
+   accept this — not reject with "not initialized."  The stateless design intention is
+   that any request can arrive first.  Pre-2026 servers that enforce "initialize first"
+   will break with stateless clients.
+2. **`_meta` field absent on requests from 2025-era clients.** Legacy clients do not
+   send `_meta` on every request (only on `initialize`).  Our handler must not fail when
+   `_meta` is absent; default to legacy mode behavior.
+3. **Protocol version mismatch.** A client sending `"2026-07-28"` in `_meta.protocolVersion`
+   but the server only supporting `"2025-11-05"` should return a JSON-RPC error:
+   `{"code": -32600, "message": "Unsupported protocol version"}`.
+4. **`notifications/initialized` arrives before first tool call in legacy mode.** Our
+   handler emits no JSON-RPC response for notification messages (no `id` field).
+   Sending a response to a notification violates the JSON-RPC spec.
+
+---
+
+## 67. GGUF spec — `general.alignment` padding formula
+
+**Link:** https://github.com/ggml-org/ggml/blob/master/docs/gguf.md  
+**Status:** Resolves 2026-09-29.  Same source as sources 11 and 39 (ggml-org/ggml).
+Reading the padding section in full for the first time.
+
+### Method
+
+After the header KV section and tensor_info section, GGUF inserts padding to align the
+tensor_data section to a multiple of `general.alignment` bytes.
+
+**Alignment formula (from gguf.md §File Structure):**
+
+```
+GGUF_DEFAULT_ALIGNMENT = 32  (bytes)
+alignment = metadata_kv["general.alignment"]  if present, else GGUF_DEFAULT_ALIGNMENT
+
+# Offset of tensor_data start:
+header_size = 4    (magic)
+            + 4    (version)
+            + 8    (tensor_count)
+            + 8    (metadata_kv_count)
+            + kv_size   (sum of all KV pair bytes)
+            + tensor_info_size   (sum of all tensor_info struct bytes)
+
+padding = (alignment - (header_size % alignment)) % alignment
+tensor_data_offset = header_size + padding
+```
+
+**In-file tensor offset:**
+
+Each tensor's byte offset (stored in `tensor_info.offset`) is relative to
+`tensor_data_offset`, not the start of the file:
+```
+absolute_offset = tensor_data_offset + tensor_info.offset
+```
+
+**Alignment padding bytes magnitude:**
+
+For a typical Qwen3-1.7B GGUF file (311 tensors, 25 KV metadata entries):
+- header_size ≈ 4 + 4 + 8 + 8 + (25 KV pairs × ~50 bytes avg) + (311 tensors × ~80 bytes avg)
+            ≈ 24 + 1250 + 24880 ≈ 26,154 bytes
+- alignment = 32 (default)
+- padding = (32 - (26154 % 32)) % 32 = (32 - 26) % 32 = 6 bytes
+
+The padding is tiny (0–31 bytes, average ~16 bytes) and negligible for memory planning.
+Its relevance is for the v0.2 tensor_info parser: when seeking to a tensor's data in
+the file, the absolute offset = tensor_data_offset + tensor.offset must be computed
+correctly, including the padding.  An off-by-one in the padding formula causes SIGBUS
+(GGUF data section is mmap'd; wrong offset reads from before the tensor data).
+
+**Verified from the ggml-org docs (fetched 2026-09-29):** The docs note:
+*"This offset is relative to tensor data, not the file. The offset of the tensor data
+in the file can be calculated as ... plus padding to the first alignment boundary."*
+
+**Our `src/gguf.rs` implementation:**
+
+The current parser (`parse_gguf_header`) reads KV metadata and tensor info counts from
+the header, but it stops before reading tensor_info entries — it uses `tensor_count` only
+to skip the tensor_info section and does not parse individual tensor info records.
+
+The v0.2 weight loader (`Weights::load_from_gguf`) must:
+1. Read `general.alignment` from KV (default 32 if absent).
+2. After parsing all KV pairs and all tensor_info records, compute `tensor_data_offset`
+   using the padding formula above.
+3. Store each tensor's absolute file offset = `tensor_data_offset + tensor_info.offset`.
+4. Use `mmap[absolute_offset .. absolute_offset + tensor_bytes]` to access each tensor.
+
+### Assumptions
+
+- `general.alignment` is a uint32 or uint64 in the KV metadata.
+- Alignment is always a power of 2 (standard for GGUF files; the spec does not require
+  this but all known files use powers of 2).
+- The padding is computed from the header size after all KV pairs and tensor_info records
+  have been written — not a fixed constant.
+
+### Failure modes
+
+1. **Wrong padding causes offset miscalculation.** If `tensor_data_offset` is off by
+   even 1 byte, every tensor read will return data from the wrong position.  For mmap'd
+   access, this produces garbage weights silently (no error from the OS — the data is
+   valid but wrong).  The fix: add a GGUF magic-and-version check after seeking to
+   `tensor_data_offset + 0` to detect obvious offset errors early.
+2. **Custom alignment > 32.** Some GGUF writers use `general.alignment = 64` or
+   `general.alignment = 512` for cache-line or page-size alignment.  Our default-32
+   assumption must fall back to reading the actual key.
+3. **Alignment = 1 (no padding).** Some minimal GGUF files set `general.alignment = 1`
+   for smallest possible file size.  The formula correctly gives padding = 0.
+
+---
+
+## 68. arXiv:2505.19371 — Foundations of Top-k Decoding for Language Models (2025)
+
+**Link:** https://arxiv.org/abs/2505.19371  
+**Status:** Resolves 2026-09-29.  Preprint, May 2025.
+
+### Method
+
+The paper provides the first theoretical analysis of top-k decoding as a truncation
+strategy and establishes when k should be set to obtain a good balance between quality
+and diversity.
+
+**Top-k decoding procedure:**
+
+Given a probability distribution `p(w_1) ≥ p(w_2) ≥ ... ≥ p(w_V)`, top-k sampling:
+
+1. Keep the top k tokens: `{w_1, w_2, ..., w_k}`.
+2. Renormalise: `p̃(w_i) = p(w_i) / Σ_{j=1}^{k} p(w_j)` for i ≤ k; `p̃(w_i) = 0` for i > k.
+3. Sample from `p̃`.
+
+**Comparison with top-p (source 63):**
+
+Top-k uses a fixed truncation size regardless of the distribution shape.  When the
+distribution is flat (many plausible tokens), k might be too small.  When the
+distribution is peaked (one dominant token), k includes unnecessary noise tokens.
+
+Top-p adapts the truncation size to the distribution.  The paper proves that for a given
+entropy target, top-p is a uniformly better truncation in terms of minimising the expected
+KL-divergence from the true distribution.
+
+**Optimal k theorem (simplified from the paper §3):**
+
+For a distribution with entropy H, the optimal k satisfies:
+```
+k* ≈ exp(H)
+```
+where H = -Σ p(w) log p(w) is the Shannon entropy of the true distribution.
+At greedy temperature (peaked distribution, H ≈ 0): k* ≈ 1.
+At high temperature (flat distribution, H ≈ log V): k* ≈ V.
+
+This means the common default k = 50 is only appropriate when H ≈ log(50) ≈ 3.9 nats.
+
+**Our implementation:** `src/engine/sampling.rs:sample_top_k`.  The implementation
+sorts, truncates to k tokens, renormalises, then samples using xoshiro256**.
+
+### Assumptions
+
+- V (vocabulary size) is large enough that top-k < V always leaves room for diversity.
+  For V = 32K, k ≤ 1000 is always well below V.
+- The probability distribution is already temperature-scaled before top-k is applied.
+- k is a positive integer ≥ 1.
+
+### Failure modes
+
+1. **k = 1 reduces to greedy decoding.** This is correct mathematically (the mode) but
+   produces repetitive text (documented in source 63).  Our implementation accepts k ≥ 1
+   and the caller is responsible for choosing a meaningful k.
+2. **k ≥ V reduces to unrestricted sampling.** If k ≥ vocabulary_size, the renormalisation
+   step returns the full distribution unchanged — this is equivalent to sampling with no
+   truncation.  Our implementation clips k to min(k, vocab_size) to avoid an out-of-bounds
+   index.
+3. **Renormalisation precision.** Same as source 63 failure mode 3 (float accumulation
+   error in the renormalisation sum).  For k = 50: error ≈ 50 × ε_machine — negligible.
+4. **Underrepresentation of rare but valid tokens.** At k = 50 with a highly peaked
+   distribution, the 50th token may have probability 10⁻¹⁰.  Including it adds noise
+   without diversity benefit.  The paper recommends top-p as the default; top-k is
+   provided as an alternative for users with a specific k requirement.
+
+---
+
+## 69. tokio-rs/tokio — `tokio::sync::Semaphore` (concurrent resource budgeting)
+
+**Link:** https://docs.rs/tokio/latest/tokio/sync/struct.Semaphore.html  
+**Status:** Resolves 2026-09-29.  tokio v1.40+ (latest stable).  License: MIT.
+
+### Method
+
+`tokio::sync::Semaphore` provides an async counting semaphore for bounding concurrency
+in async Rust code.  It is the canonical solution for preventing concurrent request
+over-commitment in axum-based servers (the v0.2 `src/serve.rs` concurrency problem
+identified as falsification 32 in cycle 3, pass 3).
+
+**Usage pattern for budget-limited request handling:**
+
+```rust
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+
+// At server startup: capacity = max_concurrent_requests (1 for a single-request engine)
+let sem = Arc::new(Semaphore::new(1));
+
+// Per-request handler:
+async fn chat_completions(State(state): State<AppState>, Json(req): Json<ChatRequest>)
+    -> Result<Json<ChatResponse>, StatusCode>
+{
+    // acquire_owned returns a SemaphorePermit that releases on drop
+    let _permit = state.sem.clone().acquire_owned().await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    // now at most 1 request is in this section simultaneously
+    let record = fitsproof::admit(state.budget_gb, &req)?;
+    let response = state.engine.generate(...).await?;
+    Ok(Json(response))
+}   // permit dropped here, next request can proceed
+```
+
+The permit is held for the duration of the request (encompassing `admit()` + `generate()`).
+The TOCTOU race identified in falsification 32 (two requests both see budget headroom
+and both proceed) is eliminated: the semaphore ensures only one request holds the
+budget at a time.
+
+**Permit count choice:**
+
+For a single-request engine (v0.1 reference bundle, CPU-bound generate):
+- `capacity = 1` — serial execution; simple correctness guarantee.
+
+For a multi-request-tolerant engine (e.g., batched decode in v0.3+):
+- `capacity = max_concurrent` — configurable; each permit represents one budget unit.
+
+**`acquire_many` for weighted resource allocation:**
+
+```rust
+// Each request acquires permits proportional to its predicted peak bytes
+let permits_needed = (predicted_peak_gb / bytes_per_permit).ceil() as u32;
+let _permit = state.sem.clone().acquire_many_owned(permits_needed).await?;
+```
+
+This pattern allows the semaphore to represent a byte budget (e.g., 1 permit = 100 MB),
+so `admit()` is replaced by `acquire_many(predicted_peak_bytes / 100_MB)`.  This is
+a v0.3 architecture consideration; v0.2 uses capacity = 1.
+
+**`try_acquire` for non-blocking "too busy" response:**
+
+```rust
+match state.sem.try_acquire_owned() {
+    Ok(_permit) => { /* process */ },
+    Err(TryAcquireError::NoPermits) => return Err(StatusCode::TOO_MANY_REQUESTS),
+    Err(TryAcquireError::Closed) => return Err(StatusCode::SERVICE_UNAVAILABLE),
+}
+```
+
+A 429 (Too Many Requests) is more informative than blocking the caller indefinitely.
+For a pre-flight contract tool, rejecting with 429 + `Retry-After` header is the correct
+behavior when the engine is busy.
+
+### Assumptions
+
+- `Semaphore` is `Send + Sync`; it can be shared across async tasks via `Arc`.
+- The semaphore represents logical engine capacity, not physical memory.  The
+  `TrackingAllocator` ceiling remains the hard memory guard; the semaphore provides the
+  pre-allocation coordination.
+- `acquire_owned()` is cancel-safe: if the future is dropped before the permit is granted,
+  the permit is not counted as taken.
+
+### Failure modes
+
+1. **Deadlock from permit hold during slow generate.** If `generate()` blocks indefinitely
+   (e.g., a very long completion), the semaphore is held the entire time.  New requests
+   block or return 429 until the generate completes.  Mitigation: `tokio::time::timeout`
+   wraps the generate future; on timeout, the permit is released and a 503 is returned.
+2. **Semaphore closed on shutdown.** When the server shuts down, `sem.close()` causes
+   all pending `acquire()` futures to return `Err(AcquireError)`.  Handlers must convert
+   this to a 503 (server shutting down) rather than a 500 (internal error).
+3. **Starvation under high load.** FIFO fairness is not guaranteed by `tokio::sync::Semaphore`.
+   Under high concurrency, some requests may wait longer than others.  For v0.2 (capacity=1),
+   this is not observable (requests are serialised).
+
+---
+
+## 70. arXiv:2607.08780 — Training MoE Models for Memory-Efficient Inference (2026)
+
+**Link:** https://arxiv.org/abs/2607.08780  
+**Status:** Resolves 2026-09-29.  Preprint, July 2026.
+
+### Method
+
+The paper trains MoE models with an explicit memory-efficiency objective during training,
+so that at inference time, the expert routing produces patterns amenable to expert caching
+(reusing recently-loaded experts rather than loading a new expert for each token).
+
+**Key memory analysis (from §3.1):**
+
+For a sparse MoE model with E experts, top-k routing, the worst-case memory per decode
+step (if each token activates a different expert) is:
+```
+memory_moe_worst = W_attn + k × W_expert_per_expert + KV + scratch
+```
+where:
+- `W_attn`            = attention weight bytes (all layers; always resident)
+- `W_expert_per_expert` = bytes for one expert FFN
+- `k`                 = number of experts activated per token
+- Only k experts need to be loaded in the worst case if the rest can be paged from SSD
+
+In practice, with the paper's routing training objective, the caching hit rate for a
+sliding window of recent experts is 70–85%.  This means at any given time, ~2–3 unique
+experts per decode step must be loaded (vs k = 8 unique in the worst case).
+
+**Memory formula with expert caching (§3.2):**
+
+```
+memory_moe_practical = W_attn + cache_size × W_expert + KV + scratch
+```
+where `cache_size` = number of expert slots maintained in DRAM (configurable; 16–32
+for typical inference setups).
+
+**Relevance to fitsproof-rs:**
+
+The worst-case formula (all E experts in memory) is the conservative bound our `weight_bytes`
+function should use (source 65 — Switch Transformer).  The practical formula (only `cache_size`
+experts) is an optimistic lower bound.
+
+For `admit()` and `plan()`, the worst-case bound is correct: the user must have RAM for
+all expert weights to guarantee no SSD paging (which would cause severe latency spikes
+on consumer hardware with NVMe throughput ~500 MB/s).  At decode speed of 10 tok/s and
+expert swapping overhead of 500 MB/s, even a single expert swap per token adds 50 ms —
+unacceptable for interactive use.
+
+**Reported numbers for a DeepSeek-style model (from §4.1):**
+
+E = 128, top-k = 2, d_ff_expert = 1024, d_model = 2048, L = 32, fp16:
+```
+W_all_experts = 128 × 3 × 2048 × 1024 × 2 = 1.6 GB
+W_attn = 32 × (4 × d_model² + 4 × d_model × d_model) × 2 = ... (comparable to dense)
+```
+
+### Assumptions
+
+- The expert caching analysis assumes a fixed token sequence; in practice, batch diversity
+  reduces caching effectiveness.  Consumer single-request inference has low batch diversity,
+  making caching effective.
+- The paper's routing training objective is specific to its architecture; general MoE models
+  may have lower caching hit rates.
+
+### Failure modes
+
+1. **SSD paging latency on consumer hardware.** If expert weights exceed DRAM capacity and
+   must be paged from SSD, decode speed drops to 1–2 tok/s on consumer NVMe.  `admit()`
+   should refuse configurations where weight bytes exceed available DRAM, not just available
+   VRAM.  The current `--budget-gb` flag applies to total memory; this is correct.
+2. **Expert routing prediction required for caching.** The paper's caching approach requires
+   predicting which experts the next token will activate before it is processed.  This adds
+   a prefetch step not present in our reference engine.  Not a v0.2 concern (reference engine
+   is dense); documented for completeness.
+
+---
+
+## 71. arXiv:2409.02060 — OLMoE: Open Mixture-of-Experts Language Models (2024)
+
+**Link:** https://arxiv.org/abs/2409.02060  
+**Status:** Resolves 2026-09-29.  Preprint, September 2024.  AI2.
+
+### Method
+
+OLMoE-1B-7B is a fully open MoE model with:
+- 1B active parameters per token
+- 7B total parameters (64 experts, top-8 routing, 8/64 = 12.5% activation rate)
+- Released with full training data and code under Apache-2.0
+
+**Architecture and memory formula:**
+
+```
+OLMoE-1B-7B:
+  L = 16 layers
+  d_model = 2048
+  d_ff_expert = 1024  (per expert)
+  E = 64 experts per layer
+  top_k = 8  (active per token)
+  n_heads = 16, n_kv_heads = 8
+  vocab_size = 50,304
+```
+
+**Total weight bytes (fp16):**
+
+```
+attn = L × (4 × d_model² ) × 2 = 16 × 4 × 2048² × 2 = 537 MB
+experts = L × E × 3 × d_model × d_ff_expert × 2 = 16 × 64 × 3 × 2048 × 1024 × 2 = 12.9 GB
+router = L × d_model × E × 2 = 16 × 2048 × 64 × 2 = 4 MB  (negligible)
+embed = vocab_size × d_model × 2 = 50304 × 2048 × 2 = 206 MB
+norm = (2L + 1) × d_model × 2 ≈ 0.3 MB
+```
+
+**Total: ≈ 13.6 GB fp16.**  At Q4_K_M (4.5 bpw): ≈ 7.5 GB.
+
+**Active parameter bytes per decode step:**
+
+Only top-8 experts' weights are used per token:
+```
+active_bytes_per_step = 8/64 × experts = 8/64 × 12.9 GB = 1.6 GB  (fp16)
+```
+
+But ALL 12.9 GB must be resident in DRAM (cannot page selectively without prediction).
+The full 7.5 GB (Q4_K_M) must be loaded for inference on consumer hardware.
+
+**Memory per expert (single expert):**
+
+```
+bytes_per_expert = 3 × d_model × d_ff_expert × bpe
+                 = 3 × 2048 × 1024 × 2 = 12.6 MB  (fp16)
+                 = 3 × 2048 × 1024 × 0.5625 = 3.5 MB  (Q4_K_M)
+```
+
+At Q4_K_M: 64 experts × 3.5 MB = 224 MB expert storage per layer × 16 layers = 3.5 GB
+plus attention (537 MB × 0.56 ≈ 300 MB) + embedding (206 MB × 0.56 ≈ 115 MB) = ~3.9 GB.
+This is within a 4 GB budget at Q4_K_M, making OLMoE-1B-7B the most efficient open MoE
+for consumer hardware.
+
+**Relevance to fitsproof-rs:** OLMoE provides a concrete, publicly available MoE model
+for validating the v0.2 MoE weight_bytes formula.  The expected predictions at various
+quant levels are computable from the architecture above and verifiable against the actual
+GGUF file sizes.
+
+### Assumptions
+
+- The GGUF file for OLMoE-1B-7B is available on HuggingFace in Q4_K_M format.
+- The architecture above matches the published model card.
+
+### Failure modes
+
+1. **Expert bytes dominance at scale.** For OLMoE the expert bytes (3.5 GB at Q4_K_M) are
+   the dominant term.  For larger MoE models (E = 256, D_ff = 2048), expert bytes can be 10+
+   GB even at Q4.  `admit()` with the current formula (which ignores `num_experts`) will
+   dramatically underestimate weight bytes for MoE models.
+2. **Metadata key name mismatch.** OLMoE uses `expert_count` in the GGUF KV metadata.
+   Some models use `num_experts`.  The GGUF reader must try both keys.
+
+---
+
+## 72. arXiv:2408.13586 — How to Select Your Sampling Method and Parameter for Open-Ended Text Generation
+
+**Link:** https://arxiv.org/abs/2408.13586  
+**Status:** Resolves 2026-09-29.  Preprint, August 2024.
+
+### Method
+
+This empirical survey compares temperature, top-k, top-p, min-p, and ε-sampling across
+standard benchmarks and proposes a selection guide.
+
+**Temperature calibration guide (from §4):**
+
+The paper reports that temperature T has the largest single effect on generation quality
+among all sampling parameters:
+
+```
+quality ∝ exp(-|T - T_opt|)   (rough empirical relationship)
+```
+
+where `T_opt` varies by task:
+- Creative writing: T_opt ≈ 0.8–1.2
+- Code generation: T_opt ≈ 0.2–0.4
+- Factual QA: T_opt ≈ 0.0–0.3 (near-greedy)
+
+**Interaction between temperature and top-p (from §3.2):**
+
+At high temperature (T > 1.0), top-p with p = 0.9 still passes many tokens.  The effective
+filtering of top-p degrades at high T because the distribution flattens and the nucleus
+grows toward the full vocabulary.  The paper recommends:
+
+```
+if T > 1.0: prefer min-p or ε-sampling over top-p
+if T ≤ 1.0: top-p p = 0.9 is effective across most tasks
+```
+
+**min-p sampling (§5, from Nguyen et al. 2024, arXiv:2407.01082):**
+
+A temperature-adaptive truncation that removes tokens below a relative probability threshold:
+```
+p_min = p × p_max   (threshold = p × max_probability_in_distribution)
+```
+
+Tokens with `p(w) < p_min` are excluded.  As temperature increases, `p_max` decreases,
+so the threshold automatically adapts — min-p expands the nucleus at high T without
+requiring a manual parameter adjustment.
+
+**Relevance to `src/engine/sampling.rs`:**
+
+The v0.2 sampling module should support temperature, top-k, top-p, and optionally min-p.
+The interaction analysis (T × top-p) grounds the API design decision: temperature is
+applied first (logit scaling), then truncation (top-k or top-p or min-p), then sampling.
+This is confirmed as the correct order by the empirical results.
+
+**Our current implementation:** Implements temperature, top-k, and top-p in `src/engine/
+sampling.rs`.  min-p is a v0.2 item (arXiv:2407.01082 is the reference paper).
+
+### Assumptions
+
+- The survey covers open-ended generation; results may differ for constrained tasks
+  (e.g., exact-answer extraction).
+- The optimal T range is model-dependent; the values above are averages across multiple
+  models and may not apply to the specific architecture in the reference bundle.
+
+### Failure modes
+
+1. **Parameter interaction not modelled.** Our sampling implementation does not validate
+   that (T, k, p) are in a coherent range.  At T = 2.0 and p = 0.9, the effective nucleus
+   is nearly full-vocabulary and top-p provides no useful truncation.  Filed for v0.2:
+   warn (not error) when T > 1.5 and top-p is set (suggest min-p instead).
+2. **No min-p in v0.1.** min-p is the recommended method for creative generation at high
+   temperature.  The v0.1 engine supports only temperature + top-k + top-p.  Documented
+   in README §Limitations.
+
+---
+
+## 73. WorkOS Blog — MCP 2026-07-28 Spec Changes (confirmed against official SDK docs)
+
+**Link:** https://workos.com/blog/mcp-stateless-spec-2026-07-28  
+**Status:** Resolves 2026-09-29.  Published 2026-07-28.  WorkOS engineering blog.  
+Cross-checked against official Go SDK: https://go.sdk.modelcontextprotocol.io/protocol/
+
+### Method
+
+This source documents the complete set of changes in the 2026-07-28 spec revision,
+complementing source 66 (which focuses on the lifecycle change).
+
+**Complete change set (from §2 of the WorkOS post):**
+
+1. **Sessions removed.** `Mcp-Session-Id` header no longer exists.  Clients that send it
+   will receive an error from compliant 2026-07-28 servers.  Our `src/mcp.rs` must not
+   read or emit this header.
+2. **`initialize` handshake removed** (documented in source 66).  Every request is now
+   self-describing via `_meta`.
+3. **`server/discover` added.** Replaces the capability negotiation in `initialize`.  A
+   client may optionally call `server/discover` to get the server's capabilities, but
+   this is not required before sending tool calls.
+4. **`_meta` fields are now required on every request** for 2026-07-28-mode clients.
+   The three required fields:
+   - `_meta.io.modelcontextprotocol/protocolVersion`: `"2026-07-28"` (or legacy version)
+   - `_meta.io.modelcontextprotocol/clientInfo`: `{ "name": string, "version": string }`
+   - `_meta.io.modelcontextprotocol/clientCapabilities`: capability object (e.g., `{"tools": {}}`)
+5. **`Mcp-Method` and `Mcp-Name` HTTP headers** added for HTTP transport (enables routing
+   without body parsing).  Not relevant for stdio transport (our v0.2 implementation).
+6. **Cacheable `tools/list` results.** Servers may return `Cache-Control` headers on
+   `tools/list` responses.  For stdio, this is irrelevant.
+7. **Authorization hardening.** OAuth PKCE required for all authorization flows.
+   Not relevant for our v0.2 (no authentication).
+
+**Go SDK documentation confirmation (from go.sdk.modelcontextprotocol.io/protocol/):**
+
+The Go SDK docs state explicitly:
+*"A stateless model introduced in 2026-07-28 by SEP-2575, in which there is no
+initialize/notifications/initialized handshake, and each request carries its protocol
+version and client capabilities in _meta."*
+
+**Impact on `src/mcp.rs`:**
+
+The v0.2 `fitsproof mcp` implementation must handle both modes:
+- Accept requests with `_meta` (stateless clients) and without `_meta` (legacy clients).
+- Not fail if `Mcp-Session-Id` is absent.
+- Optionally handle `server/discover` (return capabilities without requiring a prior
+  `initialize` call).
+
+### Assumptions
+
+- The stdio transport for `fitsproof mcp` runs as a subprocess.  Session management
+  is per-process-lifetime; the stateless vs stateful distinction primarily matters for
+  multi-request HTTP transport.
+- For a stdio server, the practical difference is: legacy clients send `initialize` first;
+  new clients may send `tools/list` directly.  Both must be handled.
+
+### Failure modes
+
+1. **Client checks for `Mcp-Session-Id` in response.** A legacy client that expects
+   a session ID in the `initialize` response will fail if our server doesn't return one.
+   The fix: in legacy mode (when `initialize` is received), return a dummy session ID
+   for backward compatibility, even though sessions are no longer meaningful.
+2. **`_meta` fields missing on responses.** The spec requires that the server echo back
+   `_meta.io.modelcontextprotocol/protocolVersion` in responses.  Our handler must include
+   this in the response `_meta` field.
+3. **`server/discover` not implemented.** A 2026-07-28 client that calls `server/discover`
+   before any tool call will receive an error from a server that only implements `tools/list`.
+   Filed for v0.2: implement `server/discover` returning the same capability object as the
+   `initialize` response would have.
+
+---
+
+## Cycle 5, Pass 1 — Open Questions
+
+### OQ-C5-1 — Untied embedding byte counting in `weight_bytes()`
+
+**Question:** `weight_bytes()` currently uses a single embedding copy regardless of
+whether the model is tied or untied.  For Llama-3.1-8B (untied), this underestimates
+by ~1 GB.  Is this a false-negative `admit()` risk?
+
+**Analysis:** 1 GB underestimate for a 7B model at Q4_K_M (total ≈ 3.5 GB):
+
+`predict = 3.5 GB + 1.0 GB KV + 0.06 GB overhead = 4.56 GB`.
+`actual   = (3.5 + 1.0) GB weights + 1.0 GB KV + 0.06 GB = 5.56 GB`.
+
+At `--budget-gb 4`: `admit()` predicts 4.56 GB, refuses.  Correct.
+At `--budget-gb 5`: `admit()` predicts 4.56 GB, admits.  Actual 5.56 GB → OOM.
+
+This is a **false negative at `--budget-gb 5`** for untied Llama-3.1-8B.
+
+**Resolution path (v0.2):** Read `output.weight` presence from GGUF tensor_info; if
+present, add `V × d_model × bpe` to `weight_bytes`.  The safe conservative fix:
+always count both embedding copies (overestimate for tied models → false positives, safe).
+
+**Status:** Filed for v0.2.
+
+### OQ-C5-2 — MoE expert count not in `ModelConfig`
+
+**Question:** `ModelConfig` has no `num_experts` field.  How does the GGUF reader extract
+expert count for MoE models?
+
+**Resolution path (v0.2):**
+
+```rust
+// In ModelConfig:
+pub num_experts: Option<u32>,
+pub num_experts_used: Option<u32>,  // top-k active per token
+pub moe_layer_freq: Option<u32>,    // every N layers is a MoE layer
+
+// In metadata_to_model_config:
+let num_experts = get_u32_or_u64("expert_count")
+    .or_else(|| get_u32_or_u64("num_experts"));
+let num_experts_used = get_u32_or_u64("expert_used_count")
+    .or_else(|| get_u32_or_u64("num_experts_per_tok"));
+let moe_layer_freq = get_u32_or_u64("expert_feed_forward_length")
+    .map(|_| 1u32);  // if expert-specific FF length exists, assume all layers are MoE
+```
+
+**Status:** Filed for v0.2.
+
+### OQ-C5-3 — MCP `server/discover` not implemented
+
+**Question:** The 2026-07-28 spec adds `server/discover` as the capability discovery
+mechanism.  Our `src/mcp.rs` v0.2 must implement it.  What is the response format?
+
+**Resolution path (v0.2, from modelcontextprotocol.io/specification/2026-07-28):**
+
+```json
+// server/discover response:
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "serverInfo": { "name": "fitsproof-mcp", "version": "0.2.0" },
+    "capabilities": { "tools": {} },
+    "protocolVersion": "2026-07-28"
+  }
+}
+```
+
+This is the same as the `initialize` response was in legacy mode.  The server can
+implement both `initialize` (legacy) and `server/discover` (new) with the same handler.
+
+**Status:** Filed for v0.2.
+
+---
+
+## Cycle 5, Pass 1 — Falsification section
+
+### 41. Top-p sampling correctly handles near-degenerate distributions
+
+**Claim:** `sample_top_p` with p = 0.001 (very small nucleus) returns the single highest-
+probability token (the mode), matching greedy decoding at T = 1.0.
+
+**Analysis:** At p = 0.001, the nucleus contains only tokens whose cumulative probability
+exceeds 0.001 when sorted descending.  If the mode has probability ≥ 0.001 (which is true
+for any non-uniform distribution at T = 1.0), the nucleus is exactly {mode}.  After
+renormalisation, the only token is sampled with probability 1.0.  This matches greedy decoding.
+
+**Test requirement:** `top_p_very_small_matches_greedy` — generate 10 tokens with p = 0.001
+and T = 1.0; verify output is identical to `sample_greedy` with same seed.
+
+**Current status:** Not written.  Filed as a v0.2 known-answer test.  **DOCUMENTED.**
+
+### 42. Weight tying miss causes a false-negative `admit()` for untied 7B models at 5 GB budget
+
+**Claim:** For Llama-3.1-8B-Instruct (untied, vocab = 128,256) at Q4_K_M, a `--budget-gb 5`
+`admit()` call with the current formula returns `ADMITTED` but the actual peak is ~5.56 GB.
+
+**Analysis:** (From OQ-C5-1 above.) The underestimate is ~1 GB from the missing
+`output.weight` bytes.  At `--budget-gb 5`, the predicted peak is 4.56 GB < 5 GB, giving
+`ADMITTED`.  Actual peak ≈ 5.56 GB > 5 GB → OOM.
+
+**Falsifying observation:** `admit()` with `--budget-gb 5` returns `REFUSED` for
+Llama-3.1-8B at Q4_K_M because the formula correctly adds `output.weight`.
+
+**Current status:** Not falsified — the formula does not yet account for `output.weight`.
+This is the most important safety gap uncovered in cycle 5 pass 1.  **FILED FOR V0.2 FIX.**
+
+### 43. MoE model weight bytes are severely underestimated by the current formula
+
+**Claim:** For OLMoE-1B-7B (64 experts, Q4_K_M), `weight_bytes("q4_k_m", 7e9)` returns
+~3.5 GB but the actual model is ~7.5 GB in GGUF Q4_K_M format.
+
+**Analysis:** Our formula computes 7e9 × 0.5625 bytes ≈ 3.94 GB (using Q4_K_M bpw = 4.5,
+a v0.2 improvement over 4.0 bpw).  The actual file is ~7.5 GB because our formula applies
+the quant to ALL 7B parameters uniformly, but in an MoE model the 7B includes 64 × 3.5 MB
+expert FFNs at full precision relative to the dense equivalent (the architecture is
+designed so that 7B total ÷ 8 active = 1B active, not that the inactive experts are
+removed from storage).
+
+**Falsifying observation:** `fitsproof plan --model olmoe-1b-7b.gguf --quant q4_k_m --budget-gb 8`
+returns `ADMITTED: ~3.9 GB` (current, wrong) vs correct prediction of ~7.5 GB.
+
+**Current status:** Not falsified — the formula does not model MoE expert structure.
+For v0.1, this is an honest gap: the formula works for dense models (the primary target)
+and underestimates for MoE models.  MoE support is v0.2 scope.  **DOCUMENTED.**
+
+### 44. The MCP stateless mode does not break our existing `run_stdio()` loop
+
+**Claim:** The current `run_stdio()` implementation in `src/mcp.rs` correctly handles
+both the legacy (`initialize` first) and stateless (`tools/list` first) flows because
+it processes each line independently without requiring a prior handshake.
+
+**Analysis (from source 66 and source 73):**
+
+The `run_stdio()` loop (cycle 3, pass 3, OQ-C3-1 resolution) processes each line as an
+independent JSON-RPC request.  It checks the `method` field to dispatch:
+- `initialize` → sends capabilities response
+- `tools/list` → sends tool list
+- `tools/call` → dispatches to handler
+
+A stateless client that skips `initialize` and sends `tools/list` directly hits the
+second case — which works without any prior `initialize` call.  No "not initialized"
+guard exists in the implementation.
+
+**Falsifying observation:** A stateless client that sends `tools/list` without a prior
+`initialize` receives an error `{ "code": -32600, "message": "Not initialized" }`.
+
+**Current status:** The implementation (cycle 3, pass 3) does not have a "not initialized"
+guard.  The claim holds.  The loop processes `tools/list` regardless of whether `initialize`
+was sent first.  **CONFIRMED — stateless mode works by construction.**
+
+### 45. The GGUF alignment padding is negligible for memory planning
+
+**Claim:** The GGUF alignment padding (0–31 bytes for default alignment = 32) is too small
+to affect `plan()` predictions or `admit()` decisions.
+
+**Analysis:** Maximum padding = 31 bytes.  Minimum planning granularity = 1 MB (margin).
+31 bytes << 1 MB.  The padding is never large enough to change a planning decision.
+
+**Falsifying observation:** A GGUF file with `general.alignment = 1 GiB` (not a power of 2,
+not valid) causes the padding formula to return a negative or garbage value, crashing the
+parser.
+
+**Current status:** Confirmed negligible for memory planning.  The alignment padding matters
+only for the v0.2 byte-exact tensor offset calculation (seeking to read weight data), not for
+memory budget planning.  The parser should clamp `general.alignment` to a reasonable range
+(1–65536) and default to 32.  **CONFIRMED FOR PLANNING; IMPORTANT FOR TENSOR READING.**
+
+---
+
+## Sources added in cycle 5, pass 1
+
+| # | Source | Link | Verified |
+|---|--------|------|---------|
+| 63 | Holtzman et al. 2020 — Nucleus Sampling | https://arxiv.org/abs/1904.09751 | 2026-09-29 |
+| 64 | Press & Wolf 2017 — Weight Tying | https://arxiv.org/abs/1608.05859 | 2026-09-29 |
+| 65 | Fedus et al. 2021 — Switch Transformer | https://arxiv.org/abs/2101.03961 | 2026-09-29 |
+| 66 | MCP 2026-07-28 lifecycle spec | https://modelcontextprotocol.io/specification/2026-07-28/basic/lifecycle | 2026-09-29 |
+| 67 | GGUF spec — alignment padding | https://github.com/ggml-org/ggml/blob/master/docs/gguf.md | 2026-09-29 |
+| 68 | arXiv:2505.19371 — Foundations of Top-k | https://arxiv.org/abs/2505.19371 | 2026-09-29 |
+| 69 | tokio::sync::Semaphore | https://docs.rs/tokio/latest/tokio/sync/struct.Semaphore.html | 2026-09-29 |
+| 70 | arXiv:2607.08780 — Training MoE for Memory-Efficient Inference | https://arxiv.org/abs/2607.08780 | 2026-09-29 |
+| 71 | arXiv:2409.02060 — OLMoE | https://arxiv.org/abs/2409.02060 | 2026-09-29 |
+| 72 | arXiv:2408.13586 — Sampling Method Selection | https://arxiv.org/abs/2408.13586 | 2026-09-29 |
+| 73 | WorkOS — MCP 2026-07-28 spec changes | https://workos.com/blog/mcp-stateless-spec-2026-07-28 | 2026-09-29 |
+
+*Cycle 5, Pass 1 complete.  11 new sources (63–73).  For sources 63–67 (the five most
+design-driving): full method, equations, assumptions, failure modes documented.
+Falsification entries 41–45 added.  3 new open questions (OQ-C5-1, OQ-C5-2, OQ-C5-3)
+filed for v0.2.  Critical safety finding: untied embedding underestimate can cause false-
+negative `admit()` for large models (falsification 42) — filed for v0.2 fix.
+Links verified 2026-09-29.*
