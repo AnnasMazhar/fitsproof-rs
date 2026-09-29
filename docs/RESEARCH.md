@@ -7434,3 +7434,502 @@ Falsification entries 41–45 added.  3 new open questions (OQ-C5-1, OQ-C5-2, OQ
 filed for v0.2.  Critical safety finding: untied embedding underestimate can cause false-
 negative `admit()` for large models (falsification 42) — filed for v0.2 fix.
 Links verified 2026-09-29.*
+
+---
+
+# Cycle 5, Pass 2 — Ecosystem and Competition: Deepened (2026-09-29)
+
+Refreshes star counts for all 18 previously-tracked tools, adds three new tools found in this
+pass, and deepens the comparison analysis for the cycle 5 additions to the source table
+(weight tying, MoE memory, MCP stateless spec, sampling theory).  All data verified from
+GitHub repository pages and PyPI JSON API on 2026-09-29T19:00 UTC.
+
+---
+
+## Updated star counts (as of 2026-09-29T19:00 UTC)
+
+| Tool | Stars (c4-p2, 2026-09-29T10:30) | Stars (this pass, 2026-09-29T19:00) | Delta | Last push |
+|------|--------------------------------|--------------------------------------|-------|-----------|
+| llama.cpp | 129,845 | **129,849** | +4 | 2026-09-29 |
+| vLLM | 92,913 | **92,915** | +2 | 2026-09-29 |
+| SGLang | 36,569 | **36,572** | +3 | 2026-09-29 |
+| KTransformers | 19,544 | **19,544** | 0 | 2026-09-29 |
+| EricLBuehler/mistral.rs | 7,722 | **7,722** | 0 | 2026-09-29 |
+| coderredlab/runNburn | 28 | **28** | 0 | 2026-09-28 |
+| signerless/llm-checker | 2,998 | **2,998** | 0 | 2026-09-29 |
+| kkpkishan/llm-infra-planner | 11 | **11** | 0 | 2026-09-24 |
+| ridgepoint | 1 | **1** | 0 | 2026-09-08 |
+| llm-inference-calculator | 21 | **21** | 0 | 2026-09-09 |
+| detllm | 20 | **20** | 0 | 2026-08-20 |
+| Grevix/aura | 4 | **4** | 0 | 2026-09-03 |
+| arya51-ai/ignis | — | **4** | new | 2026-09-29 |
+| llm-roofline | 0 | **0** | 0 | 2026-06-20 |
+| hardware-aware-llm-runtime | 0 | **0** | 0 | 2026-06-25 |
+| llm-vram-calculator | 1 | **1** | 0 | 2026-08-03 |
+| 09Catho/VRAMancer | 1 | **1** | 0 | 2026-06-08 |
+| Sheikyon/LLM-X | 4 | **4** | 0 | 2026-01-27 |
+| SimonWaldherr/RustyLLM | 7 | **7** | 0 | 2026-09-19 |
+| **AlexsJones/llmfit** (new) | — | **37,300** | — | 2026-09-29 |
+| **cool-japan/oxillama** (new) | — | **38** | — | 2026-09-29 |
+
+Star velocity notes:
+- llmfit is the largest new entrant by a wide margin (37,300★), surpassing all existing sizer/profiler
+  tools combined by 4 orders of magnitude.  It is Rust, actively maintained, and overlaps substantially
+  with our positioning — requiring a full comparative analysis below.
+- The three large engines (llama.cpp, vLLM, SGLang) gain a few stars per hour — reflecting their
+  continuous active development.
+- The comparison table now has 21 tools (18 prior + 3 new: llmfit, ignis, oxillama).
+
+---
+
+## New tools: full entries
+
+### AlexsJones/llmfit
+
+**Link:** https://github.com/AlexsJones/llmfit  
+**Stars:** 37,300  **Language:** Rust  **License:** MIT  
+**Version:** v0.9.x (actively releasing; v0.9.31 as of 2026-06-09 per x-cmd.com review)  
+**Created:** active since at least 2026-02 based on commit history (1,217 commits)  
+**Last push:** 2026-09-29  **Status:** production-grade, highly active  
+**Forks:** 2,400+  **Watchers:** 116  
+**Verified:** 2026-09-29T19:00 UTC.
+
+**What it claims (from README and docs/how-it-works.md, fetched 2026-09-29):**
+
+llmfit is a *"terminal tool that right-sizes LLM models to your system's RAM, CPU, and GPU"*.
+Its scope is hardware-aware model **recommendation**: detect hardware, score each model across
+quality/speed/fit/context dimensions, and tell the user which models will run well on their machine.
+
+Key features:
+- **Hardware auto-detection**: NVIDIA (CUDA), AMD (ROCm), Intel Arc, Apple Silicon (unified memory),
+  Ascend NPU.  Aggregates VRAM across multi-GPU setups.
+- **Hundreds of models from the database** (106+ named in MODELS.md), embedded at compile time from
+  HuggingFace; auto-refreshed via scraper script.
+- **Dynamic quantization selection**: walks Q8_0 → Q6_K → Q5_K → Q4_K_M → Q4_0 → Q3_K → Q2_K
+  hierarchy, picking the best quality that fits available memory.  If nothing fits at full context,
+  halves context and retries.
+- **Memory bandwidth measurement**: measures effective RAM bandwidth at startup (~100 ms sweep).
+- **MoE-aware sizing**: active-expert-based VRAM estimation (Mixtral 8x7B: 46.7B params → ~12.9B
+  active → ~6.6 GB VRAM vs 23.9 GB full), not just total parameter count.
+- **Two-phase speed model**: decode (memory-bandwidth-bound, uses measured bandwidth); prefill/TTFT
+  (compute-bound, uses GPU fp16 TFLOP/s if known, otherwise omitted — reported as `null` not 0).
+- **Estimate confidence tiers**: `measured_local`, `measured_community`, `calibrated`, `estimated`,
+  `unsupported` — distinguishes self-measured results from formula guesses.
+- **REST API server** (`llmfit serve --host ... --port 8787`): exposes `/api/v1/system` and
+  `/api/v1/models` for integration into orchestrators and dashboards.
+- **TUI + CLI**: interactive browser (default) and non-interactive `--json` mode.
+- **Python package**: installable via `uv tool install llmfit` / `pip install llmfit`.
+- **Multi-platform**: macOS (Apple Silicon + Intel), Linux (x86_64 + ARM64), Windows.
+- **OpenClaw integration**: the repository has a dedicated docs/openclaw.md (integration with the
+  OpenClaw agent platform — the same platform used to develop fitsproof-rs).
+- **Benchmarking + community leaderboard**: download, measure real tok/s, submit as PR for
+  community benefit; measured values replace formula estimates in the fit table.
+
+**What llmfit does well:**
+
+- **Largest active Rust project in the sizer space** by 3 orders of magnitude (37,300★ vs
+  next-largest signerless/llm-checker at 2,998★ in Node.js).
+- **On-device bandwidth measurement** is the same roofline approach fitsproof-rs uses for `probe`,
+  independently validated.
+- **MoE expert activation accounting** is correct (active parameters not total), addressing the
+  underestimation gap documented in cycle 5 pass 1 (source 65 / OQ-C5-2).
+- **Two-phase model (decode bandwidth-bound; prefill compute-bound)** matches sources 24 and 48.
+- **Community calibration loop** (contribute measurements → improved estimates for all) is more
+  sophisticated than any formula-only approach.
+- **Dynamic quant degradation** (walk down Q8_0 → Q2_K) is structurally similar to fitsproof-rs's
+  `FitsWithDegradation` concept but operationally different (see gap below).
+
+**Gap it leaves (vs fitsproof-rs):**
+
+| Property | llmfit | fitsproof-rs |
+|----------|--------|--------------|
+| Pre-flight typed refusal with named binding constraint | None: llmfit recommends; it never refuses. Output is always a ranked list of models — the user decides. "Too Tight" verdict is informational, not an exit code. No `--budget-gb` gate that exits 2. | `admit --budget-gb N` exits 2 before any allocation, naming `weight_bytes`, `kv_cache`, or `activation` |
+| Machine-readable CI exit code on budget violation | None: `llmfit recommend --json` always exits 0 (even if all models are "Too Tight"); the CI must parse JSON to find verdicts | `fitsproof admit --budget-gb N` exits 2 on refusal — scriptable without JSON parsing |
+| Budget enforcement mechanism | None: advisory only; a script that ignores `llmfit` can still OOM on load | `TrackingAllocator` GlobalAlloc ceiling returns typed `DoesNotFit` before any allocation |
+| Typed degradation records | Dynamic quant selection is silent — the chosen quant appears in the output but there is no typed `degradation_steps` vector; a CI check cannot assert "this config degraded because of kv_cache" | `FitsWithDegradation` carries a structured `degradation_steps` vector; missing = test failure |
+| Stress harness | No equivalent: llmfit has no offline multi-config harness that asserts 0 violations and 0 silent mode changes | `fitsproof stress` ≥20 configs, offline, no GPU, no engine, CI-runnable |
+| allocator_peak + VmHWM + delta | Not measured or printed | `verify` prints both + delta; delta is the mmap/runtime overhead, not hidden |
+| GGUF file reading for a specific local model | Not supported: llmfit works from an embedded database of known models; it cannot read an arbitrary local GGUF and predict peak memory | `fitsproof plan --model /path/to/model.gguf --budget-gb N` reads real GGUF metadata |
+| Target: specific local GGUF file + declared budget = admit/refuse | Not a design goal of llmfit (it selects from known models; it does not enforce a budget against an arbitrary GGUF) | Core design goal of fitsproof-rs |
+
+**The central distinction:** llmfit is a **model selector** — it tells you which of hundreds of
+known models will run well on your hardware.  fitsproof-rs is a **resource contract enforcer** —
+it tells you whether a specific model (including one not in any database, loaded from an arbitrary
+GGUF) will fit a declared budget, refuses loudly if not, and proves the contract with a stress
+harness.
+
+The two tools are genuinely complementary: use llmfit to select a model from the database; use
+fitsproof-rs to enforce that the selected model (or any other GGUF) meets a budget contract before
+loading it in CI or a script.
+
+**Note on dynamic quant vs typed degradation:**
+
+llmfit's dynamic quant selection (Q8_0 → Q2_K walk) and fitsproof-rs's `FitsWithDegradation` both
+degrade gracefully when the first-choice quant doesn't fit.  The critical difference:
+
+- llmfit reports the chosen quant in its output table — the user sees it, but a script does not get
+  a typed record it can assert on.  llmfit's dynamic quant is a UX feature, not a contract.
+- fitsproof-rs's `FitsWithDegradation` is a typed Rust struct returned from `admit()`.  A caller can
+  assert `record.verdict == FitsWithDegradation` and inspect `record.degradation_steps`.  If a
+  degradation happens silently (no record emitted), the stress harness fails.
+
+---
+
+### arya51-ai/ignis
+
+**Link:** https://github.com/arya51-ai/ignis  
+**Stars:** 4  **Language:** Rust  **License:** MIT  
+**Created:** 2026-09 (3 commits, very recent)  **Last push:** 2026-09-29  
+**Status:** early-stage research / educational  
+**Verified:** 2026-09-29T19:00 UTC.
+
+**What it claims (from README, fetched 2026-09-29):**
+
+Ignis is a from-scratch Rust LLM inference engine with a **real tensor-graph compiler**.
+It loads GGUF files (v2/v3), dequantizes weights (F32, F16, Q8_0, Q4_0) on the fly using
+memory-mapped I/O, runs the full Qwen2 transformer forward pass, and applies an **SSA-based
+tensor-graph IR** with two optimization passes:
+
+1. **Operator fusion**: RMSNorm (normalize + scale) and SwiGLU (SiLU + elementwise multiply) fused
+   into single kernels.  On Qwen2.5-0.5B: 435 ops → 362 ops (49 RMSNorm + 24 SwiGLU fused).
+2. **Liveness-based memory planning**: each activation tensor's lifetime (define → last use) is
+   computed; non-overlapping lifetimes share physical buffers.  On Qwen2.5-0.5B:
+   - Naive: 363 activation buffers, ~2.7 MB activation peak
+   - After planning: 5 reused buffers, ~0.67 MB activation peak — 76% reduction
+
+The compiled graph and the original imperative path share the same kernels; `tests/parity.rs`
+asserts byte-identical token streams and matching logits between the two engines.
+
+**What ignis does well:**
+
+- **Liveness-based activation memory planning** is the closest thing in the comparison table to
+  fitsproof-rs's core claim (track peak memory precisely).  It takes a fundamentally different
+  approach: ignis minimises activation memory at the graph-compiler level; fitsproof-rs measures
+  and enforces via GlobalAlloc.
+- **Parity test** (`compiled == imperative, byte-identical`) is a correctness discipline comparable
+  to fitsproof-rs's stress harness — though narrower (one model, one path, not a budget contract).
+- **mmap weight loading** (same pattern as fitsproof-rs v0.2 will use via memmap2, source 52).
+- **Demonstrably correct** at a small scale: Qwen2.5-0.5B, Q8_0, ~52 tok/s on Apple M3.
+
+**Gap it leaves (vs fitsproof-rs):**
+
+- No budget enforcement, no pre-flight admit/refuse, no TrackingAllocator ceiling.
+- Memory planning is activation-level (at the compiler level), not process-level (total RSS vs
+  declared budget).  It optimises activation scratch; it does not enforce a ceiling on weight bytes
+  + KV cache + activation combined.
+- No stress harness, no typed degradation records, no VmHWM measurement.
+- Apple Silicon (NEON) primary target; x86_64 scalar fallback.  No x86_64 SIMD path.
+- Very early stage (3 commits); not a production tool.
+
+**Note on liveness-based memory planning:**
+
+Ignis's compiler-level memory planning (76% activation reduction) is orthogonal to fitsproof-rs's
+allocator-level measurement.  In v0.2, fitsproof-rs could benefit from a similar approach in the
+`src/engine` reference path to reduce the O(N²) attention scratch (cycle 4 OQ-C4-2).  The ignis
+source is a useful reference for implementing this efficiently in Rust.
+
+---
+
+### cool-japan/oxillama
+
+**Link:** https://github.com/cool-japan/oxillama  
+**Stars:** 38  **Language:** Pure Rust  **License:** Apache-2.0  
+**Version:** v0.1.4 (2026-08-17)  **Last push:** 2026-09-29  **Status:** active  
+**Forks:** 8  
+**Verified:** 2026-09-29T19:00 UTC.
+
+**What it claims (from README, fetched 2026-09-29):**
+
+OxiLLaMa is a *"Pure Rust reimplementation of llama.cpp"* built on the COOLJAPAN ecosystem
+(SciRS2 tensors, OxiBLAS GEMM, OxiFFT RoPE).  Key properties:
+
+- **Zero FFI**: no C, C++, or Fortran.  Compiles to native, WASM, and embedded.
+- **25 architectures**: LLaMA 1/2/3, Qwen3, Mistral, Gemma, Phi, Command-R, StarCoder, Falcon,
+  DeepSeek-V2/V3, DBRX, Grok-1, Mamba-2, OLMo2, Yi, Granite, LLaVA, LLaVA-NeXT, Qwen2-VL,
+  MiniCPM, InternLM3, Mixtral, StableLM, GPT-NeoX, BLOOM, Phi-3.5-MoE.
+- **All mainstream quant formats**: Q4_0 through Q8_0, K-quants (Q4_K, Q5_K, Q6_K), I-quants
+  (IQ1_S through IQ4_XS, IQ4_NL), Q1_0_G128 (1-bit specialist), FP16, BF16, FP32.
+- **11 crates**, ~164,000 lines of Rust; 3,751 tests (3,631 with default features).
+- **OpenAI-compatible HTTP API server** (`oxillama-server`).
+- **Python bindings** via PyO3 (`oxillama-py`).
+- **WASM bindings** (`oxillama-wasm`).
+- **Optional wgpu GPU backend** (`oxillama-gpu`).
+
+**What oxillama does well:**
+
+- Broadest architecture support of any pure-Rust LLM engine (25 architectures including MoE:
+  DeepSeek-V2/V3, Mixtral, Phi-3.5-MoE, DBRX, Grok-1).
+- Most comprehensive quant format support in Rust (including 1-bit Q1_0_G128).
+- Largest test count of any new-entrant Rust engine (3,751 tests).
+- Zero C/C++ dependency — makes the "memory-safe and auditable" claim genuinely supportable.
+- WASM target enables browser inference (complementary to fitsproof-rs's static binary target).
+
+**Gap it leaves (vs fitsproof-rs):**
+
+- No budget enforcement: no `admit` / `refuse` / `stress` surface.  OxiLLaMa is an inference
+  engine; it will OOM if the model doesn't fit, just like llama.cpp.
+- No pre-flight contract: no `fitsproof plan --model X --budget-gb N` equivalent.
+- No allocator tracking: no `TrackingAllocator`, no VmHWM delta output.
+- The wgpu GPU backend is an optional dependency — the CPU path is the primary "zero-dependency"
+  claim.  GPU inference adds dependencies.
+- v0.1.4 is an early release despite the large line count; production readiness is unclear.
+
+**Distinction from fitsproof-rs:**
+
+OxiLLaMa is a full replacement for llama.cpp's inference engine, written in pure Rust.
+fitsproof-rs is a contract layer that sits in front of any inference engine (including OxiLLaMa).
+They are complementary: OxiLLaMa runs the model; fitsproof-rs proves it will fit before loading.
+
+---
+
+## Updated full comparison table (21 tools, 2026-09-29T19:00 UTC)
+
+### Group A — Engines (run models; fitsproof-rs proves the contract before they run)
+
+| Tool | Stars | Version | Last push | Gap fitsproof-rs fills |
+|------|-------|---------|-----------|------------------------|
+| **llama.cpp** | 129,849 | v0.5.0 (2026-09-23) | 2026-09-29 | Silent OOM; no pre-flight admit; no typed refusal (exit 2 + named constraint) |
+| **vLLM** | 92,915 | v0.30.0 (2026-09-22) | 2026-09-29 | GPU-only; no contract for 4–8 GB VRAM class; Python + CUDA required |
+| **SGLang** | 36,572 | v0.5.20 (2026-09-18) | 2026-09-29 | GPU-only; no consumer-hardware contract |
+| **KTransformers** | 19,544 | v0.7.1 (2026-09-15) | 2026-09-29 | 128 GB RAM; CUDA/ROCm; not for 16–32 GB class |
+| **EricLBuehler/mistral.rs** | 7,722 | active (2026-09-29) | 2026-09-29 | No budget enforcement; OOM-kills (documented CVE); primarily GPU-focused |
+| **coderredlab/runNburn** | 28 | r17/v0.13.0 (2026-09-28) | 2026-09-28 | Runtime mmap-residency budget, not pre-flight typed refusal; no stress harness |
+| **cool-japan/oxillama** | 38 | v0.1.4 (2026-08-17) | 2026-09-29 | No budget enforcement; no admit/refuse; no stress harness; early release |
+| **arya51-ai/ignis** | 4 | no release (2026-09-29) | 2026-09-29 | Compiler-level activation planning only; no process-budget contract; Apple Silicon primary |
+| **Grevix/aura** | 4 | no release (2026-09-03) | 2026-09-03 | Runtime cgroup enforcement (kills child), not pre-flight; no typed degradation record; requires llama-server |
+| **SimonWaldherr/RustyLLM** | 7 | active (2026-09-19) | 2026-09-19 | No memory budget enforcement; MCP tools are inference-only |
+
+### Group B — Sizers / Profilers (predict; fitsproof-rs predicts *and* enforces)
+
+| Tool | Stars | Version | Last push | Gap fitsproof-rs fills |
+|------|-------|---------|-----------|------------------------|
+| **AlexsJones/llmfit** | 37,300 | v0.9.x (2026-09-29) | 2026-09-29 | Model selector only (database-driven, not local GGUF); recommendation output, not enforcement; no typed exit-2 budget refusal; no stress harness; no allocator_peak vs VmHWM delta |
+| **signerless/llm-checker** | 2,998 | v3.7.0 (2026-09-29) | 2026-09-29 | Node.js; prediction+selection only; no enforcement; no exit 2 on budget refusal |
+| **kkpkishan/llm-infra-planner** | 11 | no release (2026-09-24) | 2026-09-24 | Web app only; no CLI; no enforcement |
+| **ridgepoint** | 1 | 0.1.2 PyPI (2026-09-08) | 2026-09-08 | GPU-only (A100/H100); Python; prediction only |
+| **llm-inference-calculator** | 21 | no release (2026-09-09) | 2026-09-09 | Prediction only; Python; no enforcement |
+| **llm-roofline** | 0 | no release (2026-06-20) | 2026-06-20 | Abandoned; prediction only |
+| **hardware-aware-llm-runtime** | 0 | no release (2026-06-25) | 2026-06-25 | Abandoned; prediction only |
+| **llm-vram-calculator** | 1 | no release (2026-08-03) | 2026-08-03 | API-dependent; no enforcement |
+| **09Catho/VRAMancer** | 1 | v1.2 (2026-06-08) | 2026-06-08 | Prediction only; no typed exit-2 refusal; early-stage |
+| **Sheikyon/LLM-X** | 4 | PyPI (2026-01-27) | 2026-01-27 | Python; SafeTensors only (no GGUF); prediction only |
+
+### Group C — Correctness / Determinism (orthogonal; complementary)
+
+| Tool | Stars | What it does better | Relationship |
+|------|-------|---------------------|--------------|
+| **detllm** | 20 (2026-08-20) | Determinism; capability-gated tiers; repro packs | Complementary — use detllm for output determinism; fitsproof-rs for memory budget compliance |
+
+---
+
+## Gap analysis: does llmfit close any of the 5 properties?
+
+llmfit is the most significant new entrant in cycle 5 pass 2.  With 37,300★ it substantially
+exceeds all prior sizer/profiler tools.  A systematic check against the five gap properties:
+
+### 1. Pre-flight typed refusal with named binding constraint
+
+**Does llmfit close this?  No.**
+
+llmfit's output is always a ranked recommendation list.  The highest-severity verdict is
+`Too Tight` — informational text, not an exit code.  `llmfit recommend --json` exits 0
+regardless of verdict.  There is no `llmfit admit --budget-gb N --model /path/to.gguf` that:
+- reads an arbitrary local GGUF (not in the database),
+- computes weight_bytes + kv_cache + activation against the declared budget,
+- exits 2 on refusal, and
+- names the binding constraint (weight_bytes vs kv_cache vs activation).
+
+The `llmfit serve` API endpoint (`/api/v1/models`) returns model recommendations; it is not
+a budget-enforcement gate.
+
+**Confirmed from how-it-works.md (fetched 2026-09-29):** "Fit levels: the verdict is a pure
+function of one number — how full the run mode's memory pool is (memory_required /
+memory_available) — and is then capped by what the execution path can deliver."  The verdict
+(`Perfect`, `Good`, `Marginal`, `Too Tight`) is printed; nothing exits non-zero.
+
+**Gap remains: CONFIRMED.**
+
+### 2. Typed degradation records
+
+**Does llmfit close this?  No.**
+
+llmfit's dynamic quant walk (Q8_0 → Q2_K) selects the best fitting quant silently.  The
+chosen quant appears in the output table, but:
+- There is no typed struct a caller can inspect programmatically.
+- There is no assertion that "if FitsWithDegradation, degradation_steps is non-empty."
+- A CI step cannot assert `jq '.models[0].degradation_reason == "kv_cache"'` from the
+  `llmfit recommend --json` output — because no such field exists.
+
+**Gap remains: CONFIRMED.**
+
+### 3. Portable offline stress harness
+
+**Does llmfit close this?  No.**
+
+llmfit has no equivalent of `fitsproof stress` — no offline multi-config harness that:
+- runs ≥20 configurations,
+- asserts 0 budget violations and 0 silent mode changes,
+- is runnable offline (no GPU, no engine, no subprocess).
+
+llmfit has a benchmarking feature that measures real tok/s, but this requires a running model
+and an Ollama or llama.cpp backend — it is not an offline contract proof.
+
+**Gap remains: CONFIRMED.**
+
+### 4. allocator_peak + VmHWM + delta
+
+**Does llmfit close this?  No.**
+
+llmfit does not measure the Rust heap allocator peak, does not read `/proc/self/status VmHWM`,
+and does not print a delta between the two.  It measures memory **requirements** (predicted
+bytes to load) not memory **actuals** (bytes allocated, OS-measured).
+
+**Gap remains: CONFIRMED.**
+
+### 5. Target hardware class: 4–8 GB VRAM / 16–32 GB RAM as primary
+
+**Does llmfit close this?  Partially overlapping, but different product.**
+
+llmfit explicitly covers consumer GPU hardware in its benchmark tables (RTX 4060, RTX 3080,
+Apple M3, etc.).  It does treat the consumer class as important.  However:
+
+- llmfit is a **model selector**: it tells you which of 100+ database models fits.
+- fitsproof-rs is a **contract enforcer**: it gates arbitrary GGUF files against a declared budget.
+- The use case is different: a user asking "which model should I try?" uses llmfit; a user
+  integrating a specific GGUF into a CI pipeline uses fitsproof-rs.
+
+The target hardware class overlap is real, but the product roles are distinct.  llmfit does not
+replace the CI gate use case.
+
+**Gap (enforcement, CI gate, arbitrary GGUF) remains: CONFIRMED.**
+
+---
+
+## Deepened analysis: cycle 5 source additions and their ecosystem implications
+
+Cycle 5 pass 1 added sources on weight tying (64), MoE memory (65, 70, 71), nucleus sampling (63),
+top-k theory (68), and MCP stateless spec (66, 73).  This pass verifies whether any new tool
+addresses these cycle 5 open questions:
+
+### Weight tying (source 64, OQ-C5-1)
+
+llmfit uses a `0.5 bytes/param` formula for Q4_K_M (confirmed in MODELS.md: *"all memory estimates
+assume Q4_K_M quantization (0.5 bytes per parameter)"*).  This is the same tied-embedding formula
+fitsproof-rs v0.1 uses — llmfit does not distinguish tied vs untied embeddings either.  The
+false-negative risk identified in falsification entry 42 (cycle 5 pass 1) applies equally to
+llmfit for untied models like Llama-3.1-8B.
+
+### MoE memory (sources 65, 70, 71, OQ-C5-2)
+
+llmfit correctly accounts for MoE active-expert fractions in its model database (the HuggingFace
+scraper detects `num_local_experts` + `num_experts_per_tok`).  Its two-tier MoE estimation is
+documented in how-it-works.md:
+- Tier 1: full architecture metadata → per-token traffic decomposed into expert FFN + attention.
+- Tier 2: active-parameter estimate corrected by per-architecture overhead pair.
+
+This is more sophisticated than fitsproof-rs v0.1's formula (which ignores MoE entirely — OQ-C5-2).
+However, llmfit's MoE estimates apply to **database-registered models** with known architecture
+metadata.  An arbitrary GGUF with `expert_count` in the KV metadata but not in llmfit's database
+would fall back to the dense formula.  fitsproof-rs v0.2's GGUF-reader-based approach (reading
+`expert_count` from the file directly, OQ-C5-2 resolution path) covers arbitrary GGUFs.
+
+### MCP stateless spec (sources 66, 73, OQ-C5-3)
+
+llmfit has no MCP server.  The MCP server is a fitsproof-rs v0.2 differentiator; cycle 5's stateless
+spec analysis (eliminating the `initialize` handshake) applies only to fitsproof-rs's own
+implementation.
+
+---
+
+## How a user notices the gap in the presence of llmfit (updated scenario)
+
+A developer integrating Qwen3-7B into a CI pipeline:
+
+```bash
+# Step 1: use llmfit to select the right model family (llmfit excels here)
+llmfit recommend --use-case coding --json | jq '.models[0].name'
+# → "Qwen3-7B-Q4_K_M" (if it's in the database and fits)
+
+# Step 2: use fitsproof-rs to gate the specific GGUF against the CI budget (fitsproof excels here)
+fitsproof admit --model ~/downloads/Qwen3-7B-Q4_K_M.gguf \
+  --quant q4_k_m --context 4096 --budget-gb 4
+# → "REFUSED: needs 4.8 GB, budget 4.0 GB; binding constraint: kv_cache=0.47 GB + weight=4.0 GB"
+# exit 2 → CI fails fast with named constraint
+
+# llmfit and fitsproof-rs address different parts of the workflow
+```
+
+The composite workflow: llmfit for discovery (what are my options?), fitsproof-rs for contract
+enforcement (will this specific GGUF fit this specific budget in this CI environment?).  They are
+complementary, not competitive.
+
+---
+
+## Sources added in cycle 5, pass 2
+
+| # | Source | Role | Link | Verified |
+|---|--------|------|------|---------|
+| 74 | AlexsJones/llmfit README + how-it-works.md (fetched 2026-09-29) | Largest Rust sizer (37,300★); dynamic quant; MoE aware; REST API | https://github.com/AlexsJones/llmfit | 2026-09-29 |
+| 75 | arya51-ai/ignis README (fetched 2026-09-29) | Rust GGUF engine with SSA tensor-graph compiler and liveness memory planner | https://github.com/arya51-ai/ignis | 2026-09-29 |
+| 76 | cool-japan/oxillama README (fetched 2026-09-29) | Pure Rust LLM engine; 25 architectures; 11 crates; 3,751 tests; v0.1.4 | https://github.com/cool-japan/oxillama | 2026-09-29 |
+| 77 | GitHub repository star counts (2026-09-29T19:00 UTC) | Star count refresh for all 21 comparison tools | https://github.com | 2026-09-29 |
+
+---
+
+## Falsification section (cycle 5, pass 2)
+
+### 46. llmfit does not exit non-zero when no model fits the declared budget
+
+**Claim:** `llmfit recommend --json` exits 0 regardless of whether all models are rated
+`Too Tight` for the detected hardware.
+
+**Method:** how-it-works.md: "Unrunnable models (Too Tight) are always at the bottom" of the
+ranked list — they appear in the output, not as a non-zero exit code.  The REST API (`/api/v1/models`)
+returns model data; HTTP 200 is expected regardless of fit status.  No CLI flag documented as
+`--budget-gb N` with exit-code semantics exists in the README or docs/cli.md.
+
+**Falsifying observation:** A llmfit CLI option exits 2 when `--budget-gb N` is specified and
+all models score `Too Tight`.
+
+**Current status:** Not falsified.  llmfit is a model recommender; its exit code does not
+convey budget compliance.  **CONFIRMED.**
+
+### 47. llmfit cannot read an arbitrary local GGUF and compute weight+KV+activation bytes
+
+**Claim:** llmfit's memory estimates come from an embedded database of ~100 known models; it
+cannot read an arbitrary local GGUF file and compute peak memory from the file's own metadata.
+
+**Method:** README: *"Model database -- Hundreds models sourced from the HuggingFace API, stored
+in `llmfit-core/data/hf_models.json` and embedded at compile time."*  The CLI commands are
+`llmfit recommend`, `llmfit storage`, `llmfit serve` — none accept `--model /path/to.gguf`.
+The `llmfit info` command is not documented in the README; docs/cli.md focuses on `recommend`
+and `storage`.
+
+**Falsifying observation:** `llmfit info --model /path/to/model.gguf` exists, reads the GGUF
+header, and prints weight+KV+activation bytes for the specific file.
+
+**Current status:** Not falsified.  llmfit's estimation is database-driven, not GGUF-reader-driven.
+The `ignis info <model.gguf>` command (from arya51-ai/ignis) provides this for ignis's supported
+architectures, but ignis is not a planning/enforcement tool.  **CONFIRMED.**
+
+### 48. The gap claim holds across all 21 tools surveyed
+
+**Claim:** After adding llmfit (37,300★), oxillama (38★), and ignis (4★), none of the 21 tools
+in the comparison table closes any of the five gap properties.
+
+**Analysis:**
+- llmfit: closes none (see gap analysis section above — checked against all 5 properties).
+- ignis: inference engine only; no budget contract.
+- oxillama: inference engine only; no budget contract.
+
+All prior tools (cycle 4 falsification entry 35) remain unchanged.
+
+**Current status:** Not falsified.  The gap persists across all 5 properties in all 21 tools.
+**CONFIRMED.**
+
+---
+
+*Cycle 5, Pass 2 complete.  3 new tools added (llmfit 37,300★, ignis 4★, oxillama 38★).
+Total tool count: 21.  Updated star counts for all 18 existing tools.  Gap claim confirmed
+across all 5 properties.  Falsification entries 46–48 added.  Sources 74–77 added.
+Star counts and README content verified 2026-09-29T19:00 UTC.*

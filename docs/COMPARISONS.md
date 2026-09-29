@@ -1,8 +1,8 @@
 # COMPARISONS.md — fitsproof-rs vs the ecosystem
 
-Last updated: 2026-09-29 (cycle 4, pass 9).  
-Star counts from GitHub REST API, 2026-09-29T10:30 UTC.  
-Source data: `docs/RESEARCH.md` cycles 2–4 ecosystem passes.
+Last updated: 2026-09-29 (cycle 5, pass 2).  
+Star counts from GitHub REST API, 2026-09-29T19:00 UTC.  
+Source data: `docs/RESEARCH.md` cycles 2–5 ecosystem passes.
 
 ---
 
@@ -20,38 +20,44 @@ vs OS VmHWM.  No tool in the table below provides this combination for the 4–8
 
 | Tool | Stars | What it does better than fitsproof-rs |
 |------|-------|---------------------------------------|
-| **llama.cpp** | 129,845 | Mature; hundreds of architectures; fast CPU+GPU kernels; broad quant support; actually generates text; `--cpu-moe` MoE offload |
-| **vLLM** | 92,913 | GPU production serving; PagedAttention eliminates KV fragmentation; speculative decoding; high throughput at scale |
-| **SGLang** | 36,569 | Fastest structured generation (RadixAttention, 2–5× vs vLLM on structured output benchmarks) |
+| **llama.cpp** | 129,849 | Mature; hundreds of architectures; fast CPU+GPU kernels; broad quant support; actually generates text; `--cpu-moe` MoE offload |
+| **vLLM** | 92,915 | GPU production serving; PagedAttention eliminates KV fragmentation; speculative decoding; high throughput at scale |
+| **SGLang** | 36,572 | Fastest structured generation (RadixAttention, 2–5× vs vLLM on structured output benchmarks) |
 | **KTransformers** | 19,544 | Runs 671B DeepSeek-V3 on ~14 GB VRAM with 128 GB RAM; AMX int8 expert kernels; 1.25–4.09× decode over llama.cpp |
 | **mistral.rs** | 7,722 | Production Rust inference; CUDA + Metal + CPU; Python bindings; broad model support; speculative decoding |
-| **coderredlab/runNburn** | 28 | Runs models far exceeding RAM (222 GiB model on 32 GiB budget); CPU/CUDA/Metal/Vulkan; OpenAI-compat server |
+| **AlexsJones/llmfit** | 37,300 | Hardware-aware model selection from 100+ database models; dynamic quant walk; MoE-aware; on-device bandwidth measurement; community benchmark loop; TUI+CLI+REST+Python; largest Rust sizer by far (37k★) |
+| **coderredlab/runNburn** | 28 | Runs 222 GiB model on 32 GiB budget; CPU/CUDA/Metal/Vulkan; OpenAI-compat server |
+| **cool-japan/oxillama** | 38 | Pure Rust (zero FFI); 25 architectures; all mainstream quant formats; 3,751 tests; WASM + Python bindings |
 | **signerless/llm-checker** | 2,998 | Largest model catalog (33k artifacts); MCP server (`hw_detect`, `ollama_plan`); calibrated bytes/param table |
 | **Grevix/aura** | 4 | OS-level enforcement via cgroup v2 / Win32 Job Objects; catches mmap'd allocations that GlobalAlloc misses |
+| **arya51-ai/ignis** | 4 | Rust GGUF engine with SSA tensor-graph compiler; liveness-based memory planning reduces activation peak 76% |
 | **ridgepoint** | 1 | Best prediction accuracy (~1% MAPE on A100/H100); MLA-aware; per-field `calibrated` flags; GQA correct to the byte |
 | **detllm** | 20 | Determinism verification; capability-gated guarantee tiers (T0/T1/T2); repro packs |
 
 ---
 
-## Full comparison table (18 tools)
+## Full comparison table (21 tools)
 
 ### Group A — Engines (run models; fitsproof-rs proves the contract before they run)
 
 | Tool | Stars | Version | Last push | Gap fitsproof-rs fills |
 |------|-------|---------|-----------|------------------------|
-| **llama.cpp** | 129,845 | v0.5.0 | 2026-09-29 | Silent OOM in issues; no pre-flight admit; no typed refusal with exit 2 and named binding constraint |
-| **vLLM** | 92,913 | v0.30.0 | 2026-09-29 | GPU-only; no contract for 4–8 GB VRAM class; Python + CUDA required |
-| **SGLang** | 36,569 | v0.5.20 | 2026-09-29 | GPU-only; same class as vLLM |
-| **KTransformers** | 19,544 | v0.7.1 | 2026-09-28 | 128 GB RAM recommended; CUDA/ROCm required; not for 16–32 GB class |
+| **llama.cpp** | 129,849 | v0.5.0 | 2026-09-29 | Silent OOM in issues; no pre-flight admit; no typed refusal with exit 2 and named binding constraint |
+| **vLLM** | 92,915 | v0.30.0 | 2026-09-29 | GPU-only; no contract for 4–8 GB VRAM class; Python + CUDA required |
+| **SGLang** | 36,572 | v0.5.20 | 2026-09-29 | GPU-only; same class as vLLM |
+| **KTransformers** | 19,544 | v0.7.1 | 2026-09-29 | 128 GB RAM recommended; CUDA/ROCm required; not for 16–32 GB class |
 | **EricLBuehler/mistral.rs** | 7,722 | active | 2026-09-29 | No budget enforcement; OOM-kills (documented CVE: unbounded media fetch → OOM-kill); primarily GPU-focused |
 | **Grevix/aura** | 4 | no release | 2026-09-03 | Runtime enforcement (kills child), not pre-flight; no typed degradation record; requires llama-server |
 | **coderredlab/runNburn** | 28 | r17/v0.13.0 | 2026-09-28 | Runtime mmap-residency budget, not pre-flight typed refusal; no stress harness; no allocator_peak vs VmHWM delta |
+| **cool-japan/oxillama** | 38 | v0.1.4 (2026-08-17) | 2026-09-29 | No budget enforcement; no admit/refuse; no stress harness; early release |
+| **arya51-ai/ignis** | 4 | no release | 2026-09-29 | Compiler-level activation planning only; no process-budget contract; Apple Silicon primary; 3 commits |
 | **SimonWaldherr/RustyLLM** | 7 | active | 2026-09-19 | No memory budget enforcement; MCP tools are inference-only (`generate`, `chat`, `embed`), not contract tools |
 
 ### Group B — Sizers / Profilers (predict; fitsproof-rs predicts *and* enforces)
 
 | Tool | Stars | Version | Last push | Gap fitsproof-rs fills |
 |------|-------|---------|-----------|------------------------|
+| **AlexsJones/llmfit** | 37,300 | v0.9.x | 2026-09-29 | Database-driven model selector (not arbitrary GGUF); recommendation output only; no typed exit-2 budget refusal; no stress harness; no allocator_peak vs VmHWM delta |
 | **ridgepoint** | 1 | 0.1.2 PyPI | 2026-09-08 | GPU-only (A100/H100); Python; prediction only — no enforcement, ceiling, or stress harness |
 | **llm-inference-calculator** | 21 | no release | 2026-09-09 | Prediction only; Python; no enforcement |
 | **llm-roofline** | 0 | no release | 2026-06-20 | Abandoned; prediction only; no enforcement |
@@ -72,7 +78,7 @@ vs OS VmHWM.  No tool in the table below provides this combination for the 4–8
 
 ## The five properties no single tool combines
 
-After surveying all 18 tools, these five properties are absent from every competitor:
+After surveying all 21 tools, these five properties are absent from every competitor:
 
 1. **Pre-flight typed refusal with named binding constraint** — `fitsproof admit --budget-gb N`
    exits 2 before any allocation, subprocess, or engine load, naming `weight_bytes`, `kv_cache`,
@@ -100,14 +106,18 @@ After surveying all 18 tools, these five properties are absent from every compet
 fitsproof-rs is not a replacement for any engine above.  It is a pre-flight gate:
 
 ```bash
-# fitsproof pre-flight: typed refusal if weight_bytes + kv exceeds budget (< 50 ms)
+# Step 0 (optional): use llmfit to select the model family (37k★ Rust model recommender)
+llmfit recommend --use-case coding --json | jq '.models[0].name'
+# → "Qwen3-7B-Q4_K_M"
+
+# Step 1: fitsproof pre-flight: typed refusal if weight_bytes + kv exceeds budget (< 50 ms)
 fitsproof admit \
   --model "$MODEL" \
   --quant q4_k_m \
   --context 4096 \
   --budget-gb 4
 
-# your engine (llama.cpp, mistral.rs, runNburn, etc.) — only reached if pre-flight passes
+# Step 2: your engine — only reached if pre-flight passes
 llama-cli -m "$MODEL" -c 4096 -n 200 -p "Explain GQA in one paragraph"
 ```
 
@@ -143,4 +153,4 @@ See `docs/ADOPTION.md §5` for the single most likely adoption blocker.
 
 ---
 
-*Data sourced from `docs/RESEARCH.md` cycles 2–4.  Star counts verified 2026-09-29T10:30 UTC via GitHub REST API (unauthenticated).*
+*Data sourced from `docs/RESEARCH.md` cycles 2–5.  Star counts verified 2026-09-29T19:00 UTC via GitHub REST API (unauthenticated).  21 tools surveyed.*
