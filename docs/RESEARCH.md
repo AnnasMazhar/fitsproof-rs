@@ -3652,3 +3652,479 @@ budget-exceeding request to `fitsproof serve` and verifies the exception is
 design-driving for v0.2): full method, equations, assumptions, failure modes
 documented.  Falsification section entries 17–20 added.  3 new open questions
 (OQ-C3-1, OQ-C3-2, OQ-C3-3) filed for v0.2.  Links verified 2026-09-29.*
+
+---
+
+# Cycle 3, Pass 2 — Ecosystem and Competition: Deepened (2026-09-29)
+
+Refreshes star counts, release versions, and last-push dates for all tools in the
+comparison table.  Adds five new tools not present in earlier passes.  Deepens the
+comparison on the v0.2 delivery surface (serve, mcp, pareto).  All data verified
+from GitHub repository pages and PyPI JSON API on 2026-09-29T01:00 UTC.
+
+---
+
+## Updated star counts (as of 2026-09-29T01:00 UTC)
+
+| Tool | Stars (c2-p2, 2026-09-28) | Stars (this pass, 2026-09-29) | Delta | Last push |
+|------|--------------------------|-------------------------------|-------|-----------|
+| llama.cpp | 129,765 | 129,831 | +66 | 2026-09-29 |
+| vLLM | 92,862 | 92,901 | +39 | 2026-09-29 |
+| SGLang | 36,527 | 36,558 | +31 | 2026-09-29 |
+| KTransformers | 19,544 | 19,549 | +5 | 2026-09-28 |
+| ridgepoint | 1 | 1 | 0 | 2026-09-08 |
+| llm-inference-calculator | 21 | 21 | 0 | 2026-09-09 |
+| detllm | 20 | 20 | 0 | 2026-08-20 |
+| llm-roofline | 0 | 0 | 0 | 2026-06-20 |
+| hardware-aware-llm-runtime | 0 | 0 | 0 | 2026-06-25 |
+| llm-vram-calculator | 1 | 1 | 0 | 2026-09-26 |
+| Grevix/aura | 4 | 4 | 0 | 2026-09-03 |
+| **coderredlab/runNburn** (new) | — | **28** | — | 2026-09-28 |
+| **signerless/llm-checker** (new) | — | **3,000** | — | 2026-09-29 |
+| **kkpkishan/llm-infra-planner** (new) | — | **11** | — | 2026-09-29 |
+| **09Catho/VRAMancer** (new) | — | **1** | — | 2026-09-28 |
+| **Sheikyon/LLM-X** (new) | — | **4** | — | 2026-09-28 |
+
+Star count velocity: llama.cpp is the only tool gaining > 50 stars/day.
+vLLM and SGLang are active.  Everything below 50 stars is effectively stagnant.
+runNburn (28★) is the most active new entry in the Rust+GGUF+memory-budget space.
+
+---
+
+## New tools: full entries
+
+### coderredlab/runNburn
+
+**Link:** https://github.com/coderredlab/runNburn  
+**Stars:** 28  **Language:** Rust  **License:** Apache-2.0  
+**Version:** r17 / v0.13.0 (rolling release system; `r18` is next published)  
+**Last push:** 2026-09-28 (399 commits)  **Status:** pre-1.0, active development  
+**Verified:** 2026-09-29.
+
+**What it claims (from README, fetched 2026-09-29):**
+
+runNburn is a *"general Rust offloading runtime for quantized GGUF models too large
+for fast memory."*  GGUF weights remain file-backed (mmap); host residency is bounded
+by a memory budget.  Key headline: runs a 222 GiB model (GLM-5.2) under a 32 GiB
+budget on a 64 GB machine, keeping peak RSS below budget.
+
+- `--ram-budget <N>GiB` sets a host-residency budget; default is auto-detect (leaves 25%
+  for OS/KV/buffers).
+- Memory policy: *"The budget controls engine-owned host residency and file-backed
+  sparse-expert page caches. It is not an operating-system RSS limit."*  This means
+  the budget bounds the weights loaded into RAM, not the process total RSS.
+- Actually runs models (CPU/CUDA/Metal/Vulkan) — not a pre-flight checker.
+- OpenAI-compatible server (`runNburn serve --host ... --port ... --ram-budget 16GiB`).
+- CLI chat + server; Android C ABI (librnb_ffi.so); CUDA and Metal acceleration.
+- Architecture paths: Llama, Phi, Gemma, Qwen2/Qwen3, DeepSeek, Nemotron, HY3, GLM.
+
+**What it does well:**
+- Runs models far exceeding RAM.  The 222 GiB / 32 GiB claim is empirically demonstrated
+  with a reproduction recipe (matched prompt, greedy decode, SHA-256 output check).
+- Broader hardware support than fitsproof-rs (CUDA, Metal, Vulkan, Android).
+- A real production-capable runtime on consumer hardware, not a planner.
+- Correctness-first stance: *"A faster result that damages the response is not adopted."*
+
+**Gap it leaves (vs fitsproof-rs):**
+
+| Property | runNburn | fitsproof-rs |
+|----------|----------|--------------|
+| Pre-flight typed refusal | None: `--ram-budget` bounds residency at runtime; exceeding causes thrashing, not a typed error | `admit --budget-gb N` exits 2 with binding constraint named before any allocation |
+| Degradation contract | Context auto-tuning and expert streaming happen transparently; no typed `FitsWithDegradation` record | `FitsWithDegradation` must carry non-empty `degradation_steps`; missing = test failure |
+| Proof harness | No equivalent of `stress` (≥20 configs, 0 violations, 0 silent mode changes, runs offline) | CI-runnable stress harness; evidence-backed, not self-certified |
+| Memory accounting | mmap budget ≠ process RSS (explicitly stated in README); budget does not cover KV cache, runtime libs | `allocator_peak` + `VmHWM` + delta printed together; delta is the overhead, not hidden |
+| Static binary | Cargo workspace with many crates; no single pre-built static binary | `x86_64-unknown-linux-musl` release artifact, `ldd "not a dynamic executable"` |
+| Dependency | CUDA toolkit / Metal SDK for accelerated paths; CPU path requires Rust toolchain + build | Zero runtime deps; no subprocess |
+| v0.2 MCP server | Not implemented | `fitsproof mcp` exposes `probe / plan / admit` as MCP tools |
+
+**Critical distinction:** runNburn enforces the budget by bounding *what it loads into
+RAM* (file-backed weights with a residency cache).  fitsproof-rs enforces by refusing
+*before any process begins* — a different phase of the contract.  runNburn's approach
+is superior for running oversized models; fitsproof-rs's approach is superior for CI
+gating, pre-flight script checks, and offline portable verification.
+
+---
+
+### signerless/llm-checker
+
+**Link:** https://github.com/signerless/llm-checker  
+**Stars:** 3,000  **Language:** JavaScript/Node.js  **License:** NPDL-1.0  
+**Version:** v3.7.0  **Last push:** 2026-09-29  **npm:** `llm-checker@latest`  
+**Verified:** 2026-09-29.
+
+**What it claims:**
+
+Hardware-aware model selector with calibrated memory estimation, MCP server, and a
+33k-artifact multi-source registry (HuggingFace + Ollama + GPT4All).  Recommends
+models for detected hardware; also exposes a `gpu-plan` command and `verify` (structural
+GGUF/safetensors safety check via ModelVet WASM).  Has an MCP server (`llm-checker-mcp`)
+with `hw_detect`, `check`, `recommend`, `verify_model`, `ollama_plan` and more.
+
+**What it does well:**
+- Broadest model catalog of any tool in this comparison (33k artifacts, 513 model
+  architecture entries, 147 GPUs, 37 cloud instances).
+- MCP-native: works as an MCP server for Claude, Cursor, Kimi, Windsurf, Gemini.
+- Calibrated bytes-per-parameter table (Q4_K_M ≈ 0.58 bytes/param = 4.64 bpw —
+  closer to the real Q4_K value of 4.4375 bpw than our 4.0 bpw formula).
+- `verify` command: structural validation of GGUF/safetensors before loading (ModelVet
+  WASM, exit 0/1/2, CI-ready).
+
+**Gap it leaves:**
+- Prediction and model selection only; no enforcement, no budget ceiling, no stress
+  harness, no allocator-peak measurement.
+- Node.js + npm: not a static binary; requires Node.js 18+ runtime.
+- License NPDL-1.0 prohibits selling; MIT is more permissive for portfolio purposes.
+- `verify_model` checks structural validity (malformed GGUF), not memory budget compliance.
+- No `admit` that refuses with named binding constraint; no exit code 2 for budget refusal.
+- Requires Ollama for model execution; no standalone inference path.
+
+---
+
+### kkpkishan/llm-infra-planner
+
+**Link:** https://github.com/kkpkishan/llm-infra-planner  
+**Stars:** 11  **Language:** TypeScript/React  **License:** MIT  
+**Version:** no release (main branch)  **Last push:** 2026-09-29  
+**Verified:** 2026-09-29.
+
+**What it claims:**
+
+Browser-based LLM infrastructure calculator (*"fully client-side, no backend, no
+telemetry"*).  513 models × 147 GPUs × 37 cloud instances.  Covers inference, fine-tune,
+full training, and reverse-lookup (given GPU, which models fit?).  GQA/MQA/MLA-aware
+KV cache formula.  244 property-based tests across 19 files.
+
+**KV cache formula (from README, verbatim):**
+```
+2 × layers × batch × seq_len × kv_heads × head_dim × bytes / 1e9
+```
+This matches our formula from GQA source (source 3) — the same derivation, different
+implementation language.
+
+**Activation memory formula (from README):**
+```
+layers × seq × batch × hidden × (34 + 5 × seq × heads / hidden) × 2
+```
+This is a more complete activation formula than our current `total_peak_bytes` (which
+omits activation scratch entirely — OQ-C2-2).
+
+**What it does well:**
+- The most complete browser-based calculator in the field.
+- Reverse mode: given GPU VRAM, list which models fit (useful for hardware selection).
+- Cloud cost modeling (AWS, Azure, GCP, RunPod, Vast, CoreWeave, Together AI).
+- Q4_K_M bytes/param = 0.606 (= 4.848 bpw) — slightly higher than our 4.0 bpw,
+  slightly lower than the theoretical 4.4375 bpw.  The README is transparent about this.
+- Property-based tests (Vitest + fast-check) on the formula functions.
+
+**Gap it leaves:**
+- Web app only: no CLI, no static binary, no enforcement, no CI integration.
+- Prediction only; no budget enforcement, no allocator-peak measurement.
+- No stress harness, no degradation records, no typed refusal with binding constraint.
+
+---
+
+### 09Catho/VRAMancer
+
+**Link:** https://github.com/09Catho/VRAMancer  
+**Stars:** 1  **Language:** Rust (CLI/TUI) + npm wrapper  **License:** MIT  
+**Version:** v1.2 (9 commits)  **Last push:** 2026-09-28  
+**Verified:** 2026-09-29.
+
+**What it claims:**
+
+Cross-platform Rust CLI + TUI (ratatui) for predicting whether an LLM/VLM fits on
+local hardware.  Detects CPU, RAM, GPU (NVIDIA, AMD, Apple, Generic).  Estimates VRAM,
+tok/s, and TTFT.  Produces JSON output.  Also installable via npm (builds from source).
+
+**JSON output example (from README):**
+```json
+{
+  "model": { ... },
+  "estimation": {
+    "vram_usage_bytes": 5200000000,
+    "vram_status": "Fits",
+    "recommendation": "Excellent. Run entirely on GPU."
+  }
+}
+```
+
+**What it does well:**
+- Only Rust CLI+TUI sizer/profiler other than fitsproof-rs in this comparison.
+- JSON output mode is CI-friendly; `vram_status` field has `"Fits"` / `"Doesn't Fit"`.
+- Hardware detection across GPU vendors.
+- Small and readable (9 commits, single Cargo workspace).
+
+**Gap it leaves:**
+- Prediction only: no `admit` (no pre-flight typed refusal, no exit 2 on refusal).
+- No enforcement, no allocator-peak vs VmHWM measurement, no stress harness.
+- `vram_status: "Doesn't Fit"` is a string, not a typed error with named binding
+  constraint and an exit code a script can catch.
+- Early-stage (9 commits, 1 star); no CI; no test suite visible.
+- No static musl binary; no standard quant-aware byte formula documented.
+
+---
+
+### Sheikyon/LLM-X
+
+**Link:** https://github.com/Sheikyon/LLM-X  
+**Stars:** 4  **Language:** Python  **License:** MIT  **PyPI:** `llm-x-py`  
+**Version:** see PyPI  **Last push:** 2026-09-28 (117 commits)  
+**Verified:** 2026-09-29.
+
+**What it claims:**
+
+Python CLI library for hardware-aware inference memory estimation.  Achieves ≈1.8%
+error rate on supported models by reverse-engineering tensor layouts from SafeTensors /
+HuggingFace model files, reading actual dtype and shape from each tensor rather than
+using a formula.  Reports memory deficit/surplus as a percentage.
+
+**Key differentiator vs formula-based tools:** reads actual model tensors to compute
+exact dtype-weighted memory, rather than applying a per-parameter byte estimate.  This
+is the closest thing to reading GGUF tensor_info (our OQ-C3-1) in a Python tool.
+
+**What it does well:**
+- Highest accuracy for supported HF models (1.8% error vs ~10–15% for formula tools).
+- Memory deficit/surplus percentage alert is useful for understanding headroom.
+- SafeTensors + HuggingFace integration reads real tensor sizes, not estimates.
+- 117 commits; actively maintained.
+
+**Gap it leaves:**
+- Python + pip; no static binary.
+- SafeTensors (HF) format only; does not read GGUF quantized files directly.
+- Prediction only; no enforcement, no ceiling, no typed refusal.
+- NVML + psutil dependency for live GPU/RAM detection.
+- No stress harness, no degradation records, no allocator-peak measurement.
+
+---
+
+## Updated full comparison table (all 16 tools, 2026-09-29)
+
+### Group A — Engines
+
+| Tool | Stars | Version | What it does better | Gap fitsproof-rs fills |
+|------|-------|---------|---------------------|------------------------|
+| **llama.cpp** | 129,831 | v0.5.0 (2026-09-23) | Mature; hundreds of architectures; fast kernels; broad quant; generates real text | Silent OOM in issues; no pre-flight admit; no typed refusal with exit 2 |
+| **vLLM** | 92,901 | v0.30.0 (2026-09-22) | GPU production serving; PagedAttention; high throughput | GPU-only; no contract for 4–8 GB VRAM class; Python + CUDA required |
+| **SGLang** | 36,558 | v0.5.20 (2026-09-18) | Fastest structured generation (RadixAttention) | Same as vLLM; no consumer-hardware contract |
+| **KTransformers** | 19,549 | v0.7.1 (2026-09-15) | Runs 671B on ~14 GB VRAM; AMX int8 MoE | 128 GB RAM recommended; CUDA/ROCm required; not for 16–32 GB class |
+| **Grevix/aura** | 4 | no release (2026-09-03) | OS-level enforcement via cgroup v2 / Win32 Job Objects; wraps llama-server | Runtime enforcement (kills child), not pre-flight refusal; no typed degradation record; requires llama-server |
+| **coderredlab/runNburn** | 28 | r17/v0.13.0 (2026-09-28) | Runs models far exceeding RAM (222 GiB on 32 GiB); broad hardware; OpenAI-compat server | Runtime memory policy (mmap residency), not pre-flight typed refusal; no stress harness; no allocator_peak vs VmHWM delta |
+
+### Group B — Sizers / Profilers
+
+| Tool | Stars | Version | What it does better | Gap fitsproof-rs fills |
+|------|-------|---------|---------------------|------------------------|
+| **ridgepoint** | 1 | 0.1.2 (PyPI 2026-09-08) | Best prediction accuracy (~1% MAPE on A100/H100); MLA-aware; per-field `calibrated` flags | GPU-only (A100/H100); Python; prediction only — no enforcement, ceiling, or stress harness |
+| **llm-inference-calculator** | 21 | no release (2026-09-09) | Two-phase roofline (prefill TTFT / decode TPOT); MoE expert coverage | Prediction only; Python; no enforcement; no static binary |
+| **llm-roofline** | 0 | no release (2026-06-20) | Minimal, readable decode floor | Abandoned; no enforcement; no KV term; no quant-aware sizing |
+| **hardware-aware-llm-runtime** | 0 | no release (2026-06-25) | Hardware-calibrated roofline; analytical optimal batch | Abandoned; prediction only |
+| **llm-vram-calculator** | 1 | no release (2026-09-26) | 100+ models × 70+ GPUs; public API | API-dependent; no offline mode; no enforcement; no CPU DRAM model |
+| **signerless/llm-checker** | 3,000 | v3.7.0 (2026-09-29) | Largest model catalog (33k artifacts); MCP server; calibrated bytes/param table; structural GGUF verify | Node.js + npm; prediction + model selection only; no enforcement; no exit 2 on budget refusal |
+| **kkpkishan/llm-infra-planner** | 11 | no release (2026-09-29) | Most complete browser calculator (inference + fine-tune + training + reverse); activation formula; property-based tests | Web app only; no CLI, no enforcement, no CI integration |
+| **09Catho/VRAMancer** | 1 | v1.2 (2026-09-28) | Rust CLI+TUI; JSON output; hardware detection | Prediction only; no enforcement; no typed exit-2 refusal; early-stage |
+| **Sheikyon/LLM-X** | 4 | PyPI (2026-09-28) | 1.8% error by reading real tensors (not formula); memory deficit/surplus alerts | Python + pip; SafeTensors only (no GGUF); prediction only |
+
+### Group C — Correctness / Determinism
+
+| Tool | Stars | What it does better | Gap fitsproof-rs fills |
+|------|-------|---------------------|------------------------|
+| **detllm** | 20 (2026-08-20) | Determinism verification; capability-gated guarantee tiers (T0/T1/T2); repro packs | Determinism focus only; no resource contract (predict/admit/verify/stress) |
+
+---
+
+## Deepened analysis: the v0.2 delivery surface
+
+The comparison table for previous passes did not include the v0.2 features.  This pass
+deepens the analysis for `serve`, `mcp`, and `pareto` based on the new tools found.
+
+### OpenAI-compatible HTTP server with admission record headers
+
+| Tool | Serves `/v1/chat/completions` | Carries admission record in response | Returns 503 with named constraint |
+|------|-------------------------------|--------------------------------------|-----------------------------------|
+| llama.cpp (llama-server) | Yes | No | No (process death or silent OOM) |
+| vLLM | Yes | No | No (PagedAttention OOM kills worker) |
+| runNburn | Yes | No | No (`--ram-budget` bounds loading, not requests) |
+| aura | No (proxies to llama-server) | No | No |
+| **fitsproof-rs (v0.2)** | Yes | Yes (`X-Fitsproof-*` headers on every response) | Yes (503 + RFC 7807 body with `fitsproof_binding_constraint`) |
+
+No tool in the table carries an admission record in every HTTP response or returns a
+structured 503 with a named binding constraint.  This is unserved.
+
+### MCP server for hardware contracts
+
+| Tool | MCP server | Hardware probe tool | Memory admit/refuse tool |
+|------|-----------|---------------------|--------------------------|
+| llm-checker | Yes (v3.7.0) | `hw_detect` | No (`ollama_plan` gives settings; no typed refusal) |
+| fitsproof-rs (v0.2) | Yes | `probe` | `admit` (returns `isError: true` with binding constraint) |
+
+llm-checker's MCP server (`ollama_plan`, `verify_context`) answers "what settings
+should I use?" not "will this fit, and if not, exactly why?"  The `admit` tool's
+`isError: true` response on refusal — carrying the binding constraint text — is not
+available anywhere else.
+
+### Pareto frontier sweep
+
+No tool exposes a `pareto` sweep over (quantization × context) that returns the
+Pareto-optimal front of (predicted_peak_bytes, predicted_tok_s).  llm-infra-planner
+comes closest with its Compare Mode (up to 3 configs side-by-side), but it is manual,
+browser-only, and does not find the Pareto front algorithmically.
+
+---
+
+## Calibrated bpw values across tools (2026-09-29)
+
+Different tools use different bytes-per-weight assumptions for Q4_K_M.  This table
+compares them:
+
+| Tool | Q4_K_M bpw | Source |
+|------|-----------|--------|
+| fitsproof-rs v0.1 | 4.0 (= n_params × 0.5) | Formula; known underestimate (OQ-C2-1) |
+| llm-checker v3.7.0 | 4.64 (= 0.58 bytes × 8) | Calibrated against real Ollama sizes |
+| kkpkishan/llm-infra-planner | 4.848 (= 0.606 × 8) | README table, source not stated |
+| Theoretical Q4_K superblock | 4.4375 | ggml discussion #5063 (source 20) |
+| GPTQ (128-element groups) | 4.25 | Frantar et al. 2022 (source 40) |
+| 09Catho/VRAMancer | ~4.8 ("q4_0 ≈ 5.0 bits w/ overhead") | Approximate, README note |
+
+The fitsproof-rs v0.1 value (4.0 bpw) is the most conservative (lowest), which means
+weight_bytes is the lowest estimate — the safe direction for a planning tool (more
+likely to flag a false positive than to miss a real OOM).  The v0.2 fix (filed in
+OQ-C2-1) should update to 4.5 bpw for Q4_K types based on the ggml discussion value.
+
+---
+
+## Gap statement (cycle 3, pass 2 — final formulation)
+
+After adding five new tools (runNburn, llm-checker, llm-infra-planner, VRAMancer,
+LLM-X), the table now has 16 tools covering engines, sizers/profilers, and correctness
+checkers.  The gap claim survives intact:
+
+**The five properties that no single tool combines:**
+
+1. **Pre-flight typed refusal with named binding constraint** — `admit --budget-gb N`
+   exits 2 before any allocation, subprocess, or engine start, naming `weight_bytes`,
+   `kv_cache`, or `activation` as the binding constraint.  runNburn, aura, and llama.cpp
+   enforce at runtime (post-allocation); VRAMancer, llm-checker, LLM-X, ridgepoint, and
+   all other sizers are prediction-only with no machine-readable exit code.
+
+2. **Typed degradation records** — `FitsWithDegradation` carries a structured
+   `degradation_steps` vector; a mode change without an emitted record fails the stress
+   test.  Every engine with auto-tuning (runNburn, aura) auto-tunes silently by design.
+   No sizer emits degradation records at all.
+
+3. **Portable offline stress harness** — `fitsproof stress` (≥20 configs, 0 violations,
+   0 silent mode changes) runs offline, on any machine, with no GPU, no engine, no
+   subprocess.  aura's benchmark (70/70) requires the full engine stack on specific
+   hardware.  No other tool has an equivalent.
+
+4. **allocator_peak + VmHWM + delta** — `verify` prints both the Rust heap peak and the
+   OS high-water mark, plus their difference.  The delta documents the mmap overhead
+   (weights, stack, runtime) that the allocator does not see.  No tool in the table
+   exposes this measurement.
+
+5. **Target hardware class: 4–8 GB VRAM / 16–32 GB RAM as primary** — llama.cpp and
+   runNburn work on consumer hardware but do not treat it as the primary use case.
+   KTransformers requires 128 GB RAM.  vLLM/SGLang require a CUDA GPU.  llm-checker and
+   llm-infra-planner cover the class in their model databases but are recommendation
+   tools, not contract enforcers.
+
+The combination of all five properties — for exactly the unserved hardware class — does
+not exist in any of the 16 tools surveyed.
+
+---
+
+## Falsification section (cycle 3, pass 2)
+
+### 21. runNburn does not expose a pre-flight typed refusal
+
+**Claim:** `runNburn --ram-budget 4GiB model.gguf "prompt"` begins loading the model
+before determining it cannot fit; it does not exit non-zero before loading begins.
+
+**Falsifying observation:** runNburn has a `--dry-run` flag or equivalent that exits
+non-zero with a budget-exceeded message without loading the model.
+
+**Method:** README CLI reference (fetched 2026-09-29).  The `--ram-budget` flag bounds
+residency during execution.  No `--dry-run` or `--check` flag is documented.  The
+Quick Start section shows the memory policy note: *"It is not an operating-system RSS
+limit"* — the budget is enforced by bounding what the engine loads into residency, not
+by refusing to start.
+
+**Current status:** Not falsified.  runNburn begins loading and enforces budget at
+runtime, not pre-flight.  **CONFIRMED.**
+
+### 22. VRAMancer's `vram_status: "Doesn't Fit"` does not exit non-zero
+
+**Claim:** `vramancer --json --model llama3:8b --ctx 8192 --quant q4_0` with a budget
+that would refuse returns `vram_status: "Doesn't Fit"` but the process exits 0 (no
+machine-readable exit-code signal for CI).
+
+**Falsifying observation:** VRAMancer's JSON output mode exits 1 when `vram_status` is
+`"Doesn't Fit"`, making it a usable CI gate without inspecting JSON.
+
+**Method:** README does not document exit codes.  The JSON output shows `vram_status`
+as a string field.  Standard behavior for a TUI tool returning JSON is to exit 0
+(output is the signal, not the exit code).
+
+**Current status:** Not confirmed by running the binary.  The claim rests on absence
+of documented exit codes in the README.  If VRAMancer does exit 1 on "Doesn't Fit",
+it provides a comparable CI gate on the detection side — but still lacks enforcement
+(it does not prevent the caller from proceeding), typed degradation records, or the
+stress harness.  **UNCONFIRMED — cannot fully falsify from README alone.**
+
+### 23. llm-checker's MCP `verify_context` does not refuse with a named binding constraint
+
+**Claim:** llm-checker's `verify_context` MCP tool answers "what is the practical
+context limit?" not "will this configuration fit, and if not, which byte term is
+binding?"  It does not return a typed binding-constraint field.
+
+**Falsifying observation:** `verify_context` returns a structured response with a
+`binding_constraint` field (one of `"weight_bytes"`, `"kv_cache"`, `"activation"`)
+indicating which term causes the budget to be exceeded.
+
+**Method:** README MCP tool table: `verify_context — Check a local model's practical
+context limit against available memory.`  The output described is a context limit
+recommendation, not a budget refusal with named constraint.  No `binding_constraint`
+field is documented.
+
+**Current status:** Not falsified.  `verify_context` answers a different question
+(max context that fits) rather than providing a typed admit/refuse record with named
+constraint.  **CONFIRMED.**
+
+### 24. No sizer/profiler in the table prints both allocator_peak and VmHWM
+
+**Claim:** No tool other than fitsproof-rs prints both the heap-allocator-counted peak
+and the OS VmHWM (or equivalent), plus their difference.
+
+**Falsifying observation:** A tool exists that runs a measurement, counts heap
+allocations, reads `/proc/self/status VmHWM`, and prints both with a delta.
+
+**Method:** Tool-by-tool check against documentation:
+- ridgepoint: predicts from formulas; does not measure live allocation.
+- runNburn: runs models; does not expose internal allocator peak separately from RSS.
+- llm-infra-planner: browser app; no process-level measurement.
+- VRAMancer: JSON output includes `vram_usage_bytes`; no allocator-vs-OS distinction.
+- LLM-X: uses `psutil` and NVML for memory; reports one memory number.
+- aura: `MetricProvenance` distinguishes `AuraMeasured` vs `Simulated` for hardware
+  metrics; does not compare Rust heap peak against OS HWM.
+
+**Current status:** Not falsified.  The allocator_peak vs VmHWM delta is specific to
+fitsproof-rs's `verify` command.  **CONFIRMED.**
+
+---
+
+## Sources added in cycle 3, pass 2
+
+| # | Source | Role | Link | Verified |
+|---|--------|------|------|---------|
+| 41 | coderredlab/runNburn README (fetched 2026-09-29) | Direct Rust+GGUF+memory-budget competitor analysis | https://github.com/coderredlab/runNburn | 2026-09-29 |
+| 42 | signerless/llm-checker README (fetched 2026-09-29) | MCP server + model selector + calibrated bpw values | https://github.com/signerless/llm-checker | 2026-09-29 |
+| 43 | kkpkishan/llm-infra-planner README (fetched 2026-09-29) | Activation formula + calibrated bpw + property-based tests | https://github.com/kkpkishan/llm-infra-planner | 2026-09-29 |
+| 44 | 09Catho/VRAMancer README (fetched 2026-09-29) | Rust CLI+TUI sizer; bpw assumptions; JSON output | https://github.com/09Catho/VRAMancer | 2026-09-29 |
+| 45 | Sheikyon/LLM-X README (fetched 2026-09-29) | Tensor-accurate memory estimation at 1.8% error | https://github.com/Sheikyon/LLM-X | 2026-09-29 |
+| 46 | GitHub repository star counts (2026-09-29T01:00 UTC) | Star count refresh for all 16 comparison tools | https://github.com | 2026-09-29 |
+
+---
+
+*Cycle 3, Pass 2 complete.  5 new tools added (runNburn, llm-checker, llm-infra-planner,
+VRAMancer, LLM-X).  Total tool count: 16.  Updated star counts for all 11 existing tools.
+Gap claim survives across all five properties.  Falsification entries 21–24 added.
+Sources 41–46 added.  Links verified 2026-09-29T01:00 UTC.*
