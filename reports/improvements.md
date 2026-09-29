@@ -1136,3 +1136,109 @@ $ ./target/release/fitsproof admit --budget-gb -1.0; echo "EXIT:$?"
 fitsproof admit: invalid --budget-gb value '-1.0': must be a positive number (e.g. 4.0)
 EXIT:2
 ```
+
+---
+
+## c4-p09-improve-2 (cycle 4, pass 9) — 2026-09-29
+
+### Finding fixed
+
+**Severity:** Major credibility gap — the single biggest issue a skeptical reviewer finds.
+
+**Finding:** `COMPARISONS.md` is referenced twice in `README.md` but the file does not exist.
+
+- `README.md §What this is NOT` (line 183): `` `COMPARISONS.md` says exactly where each one beats us ``
+- `README.md §Comparisons` (line 271): `See COMPARISONS.md for the full table with current star counts and release dates.`
+
+A reviewer who runs `cat docs/COMPARISONS.md` or clicks the link gets "No such file or directory."
+This is the first thing the adversarial reviewer would try after reading the README and the single
+biggest credibility gap: the repo promises transparency on comparisons ("where each one beats us")
+but the file backing that promise is absent.
+
+Secondary findings also fixed:
+
+1. **README §Architecture tree** — `adversarial.rs` listed as "28" tests (actual: 38 after c4-p05).
+2. **README §Architecture tree** — `cmd_integration.rs` (37 tests) entirely missing from the tree.
+3. **README §Comparisons short table** — `mistral.rs` (7,722★, now the 2nd largest Rust entry)
+   missing from the short version.
+
+---
+
+### Fix applied
+
+1. **`docs/COMPARISONS.md` created** — Full comparison table with all 18 tools, star counts
+   verified 2026-09-29T10:30 UTC, sourced directly from `docs/RESEARCH.md` cycles 2–4 ecosystem
+   passes.  Sections: the positioning statement, "where each tool beats us" (headline for strangers),
+   full table with Groups A/B/C, the five-properties gap claim, integration pattern with llama.cpp
+   and AURA, honest limitations.
+
+2. **`README.md §What this is NOT`** — Changed `\`COMPARISONS.md\`` to `\`docs/COMPARISONS.md\``.
+
+3. **`README.md §Comparisons`** — Changed `See \`COMPARISONS.md\`` to `See \`docs/COMPARISONS.md\``.
+
+4. **`README.md §Architecture tree`** — Updated `adversarial.rs` count from 28 → 38; added
+   `cmd_integration.rs  37 CLI integration tests` (was entirely missing).
+
+5. **`README.md §Comparisons short table`** — Added `mistral.rs` row (7,722★, production Rust
+   inference, GPU/CPU, Python bindings, broad model support).
+
+---
+
+### Before/after metrics
+
+| Metric | Before (c4-p08) | After (c4-p09-improve-2) | Delta |
+|--------|----------------|--------------------------|-------|
+| Tests run | 241 | 241 | 0 |
+| Test failures | 0 | 0 | 0 |
+| `docs/COMPARISONS.md` exists | No | **Yes** | Created |
+| README COMPARISONS.md references point to real file | No (2 dead refs) | Yes (both point to docs/COMPARISONS.md) | Fixed |
+| Architecture tree adversarial count accurate | No (28, was 38) | Yes (38) | Fixed |
+| Architecture tree lists cmd_integration.rs | No | Yes (37 tests) | Added |
+| README short comparisons table includes mistral.rs | No | Yes | Added |
+| `cargo clippy -D warnings` | PASS | PASS | — |
+| `cargo fmt --check` | PASS | PASS | — |
+
+### Raw terminal output
+
+```
+$ ~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]+ tests"
+running 131 tests
+test result: ok. 131 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.24s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 38 tests
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.92s
+running 37 tests
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 113.26s
+running 23 tests
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.29s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+```
+$ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings 2>&1
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s
+(exit 0 — clean)
+```
+
+```
+$ ~/.cargo/bin/cargo fmt --check 2>&1
+(no diff — exit 0)
+```
+
+```
+$ ls docs/COMPARISONS.md
+docs/COMPARISONS.md
+```
+
+```
+$ grep "COMPARISONS.md" README.md
+  models, and actually generate text on real weights today. `docs/COMPARISONS.md` says exactly where
+See `docs/COMPARISONS.md` for the full table with current star counts and release dates. Short version:
+```

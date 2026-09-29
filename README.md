@@ -180,7 +180,7 @@ make preflight MODEL=/path/to/llama-7b-q4.gguf BUDGET_GB=4 QUANT=q4_k_m CTX=4096
 - **Not a new CUDA kernel.** CPU-first, correctness-first scalar path. No GPU kernels. Speed
   comparisons vs llama.cpp/vLLM/KTransformers are irrelevant and intentionally omitted.
 - **Not faster than llama.cpp or vLLM.** Those are faster, more mature, cover more hardware and
-  models, and actually generate text on real weights today. `COMPARISONS.md` says exactly where
+  models, and actually generate text on real weights today. `docs/COMPARISONS.md` says exactly where
   each one beats us.
 - **Not a training tool.** Inference memory planning only.
 - **No CUDA.** This codebase was built on a machine with no CUDA toolkit. Not a limitation of the
@@ -227,8 +227,9 @@ src/
 tests/
   smoke.rs           Binary smoke tests (version, unknown command)
   stress.rs          25-config stress harness (acceptance criteria)
-  adversarial.rs     28 byzantine/edge-case tests (overflow, malformed input, boundary faults,
+  adversarial.rs     38 byzantine/edge-case tests (overflow, malformed input, boundary faults,
                      race condition close, FitsproofClient API attacks)
+  cmd_integration.rs 37 CLI integration tests (subcommand flags, error messages, exit codes)
   contract_mutants.rs  23 mutation-killing tests targeting cost/plan/admit arithmetic
   real_model.rs      Real GGUF model test (plan against real weights)
   value/
@@ -268,13 +269,14 @@ ldd target/x86_64-unknown-linux-musl/release/fitsproof  # "not a dynamic executa
 
 ## Comparisons
 
-See `COMPARISONS.md` for the full table with current star counts and release dates. Short version:
+See `docs/COMPARISONS.md` for the full table with current star counts and release dates. Short version:
 
 | Tool | What it does better than fitsproof-rs |
 |---|---|
 | llama.cpp | Mature, broad model support, fast CPU kernels, broad quant support, actually generates text |
 | vLLM | GPU serving, PagedAttention, high throughput |
 | KTransformers | CPU/GPU hybrid MoE, AMX, runs 671B on 14 GB VRAM |
+| mistral.rs | Production Rust inference, GPU/CPU, Python bindings, broad model support |
 | ridgepoint | Calibrated VRAM/roofline for GPU (A100/H100, ~1% MAPE) |
 
 fitsproof-rs's position: none of the above couples a resource contract (predict + enforce a
