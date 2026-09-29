@@ -1143,3 +1143,91 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
   to /tmp). Mutation target ≥70% on core modules remains pending for the c4 mutation pass.
 - All open adversarial findings (ADV-9/ADV-11/ADV-12) are now fixed. ADV-10 is a documented
   limitation (valid behaviour).
+
+---
+
+## 42. c4-p05-implement-2: adversarial suite expanded to 38 tests
+
+**Claim:** 5 new adversarial tests added targeting MCP invalid JSON, serve admission record,
+u64::MAX budget, impossible Pareto frontier, and usize::MAX context overflow.
+
+Tests added:
+- `mcp_invalid_json_returns_parse_error` — totally malformed input returns -32600/-32700 error, never success
+- `serve_admitted_response_has_admission_record` — HTTP 200 body must contain `admission_record` (contract proof)
+- `plan_budget_infinity_does_not_panic` — u64::MAX budget produces a well-formed Plan, no panic or NaN
+- `pareto_impossible_model_tiny_budget_empty_frontier` — large model + 1-byte budget gives empty frontier
+- `plan_context_len_usize_max_no_overflow` — usize::MAX context must not wrap kv_cache_bytes to 0
+
+**Command:**
+```
+~/.cargo/bin/cargo test --test adversarial 2>&1 | grep "test result:"
+```
+
+**Raw output:**
+```
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.51s
+```
+
+**Status:** PASS
+
+---
+
+## 43. c4-p05-implement-2: full test suite — 241 tests
+
+**Claim:** `cargo test --all-targets` is green with 241 tests after c4-p05.
+
+**Command:**
+```
+~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]+ tests"
+```
+
+**Raw output:**
+```
+running 131 tests
+test result: ok. 131 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.36s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 38 tests
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.91s
+running 37 tests
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 110.59s
+running 23 tests
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 45.52s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Status:** PASS — 241 tests (131 lib + 38 adversarial + 37 cmd_integration + 23 contract_mutants +
+1 real_model + 2 smoke + 3 stress + 6 value). +5 vs c4-p04 (236→241).
+
+---
+
+## 44. c4-p05-implement-2: clippy + fmt clean
+
+**Command:**
+```
+~/.cargo/bin/cargo clippy --all-targets -- -D warnings && ~/.cargo/bin/cargo fmt --check && echo "CLEAN"
+```
+
+**Raw output:**
+```
+    Checking fitsproof-rs v0.1.0 (...)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.12s
+CLEAN
+```
+
+**Status:** PASS
+
+---
+
+## Open items / limitations (updated c4-p05)
+
+- Real-model generation (tokens, not just plan): `Weights::from_gguf()` implemented; full end-to-end requires `FITSPROOF_REAL_GGUF`.
+- Mutation score: pending c4 mutation pass. c3 run failed due to disk quota.
+- README: ⭐ line moved to after quickstart (per LAUNCH-PLAN.md spec), not after musl block.

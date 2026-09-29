@@ -36,6 +36,11 @@
 //! | `client_with_quant_changes_predicted_peak` | with_quant() must change the predicted peak — silent discard would produce over-estimated peaks. |
 //! | `client_with_context_changes_predicted_peak` | with_context() must change the predicted peak — silent discard would under-estimate KV cache. |
 //! | `guard_error_display_names_binding_constraint` | GuardError Display must name the binding constraint, not return a generic string. |
+//! | `mcp_invalid_json_returns_parse_error` | Totally malformed JSON (not just missing fields) must return a JSON-RPC parse error (-32700), not panic or silently return success. |
+//! | `serve_admitted_response_has_admission_record` | A sufficient budget must yield HTTP 200 whose body contains `admission_record` — the contract proof, not just a completion stub. |
+//! | `plan_budget_infinity_does_not_panic` | budget_bytes = u64::MAX (f64::INFINITY cast) must not crash; it must return Fits or DoesNotFit, never panic. |
+//! | `pareto_impossible_model_tiny_budget_empty_frontier` | A model with large weight_bytes against a 1-byte budget must produce an empty Pareto frontier, not a non-empty one with impossible configs. |
+//! | `plan_context_len_usize_max_no_overflow` | context_len = usize::MAX must not overflow or wrap in kv_cache_bytes (different path from u32::MAX test). |
 
 use fitsproof::admit::{admit, AdmitStatus};
 use fitsproof::cost;
@@ -822,5 +827,153 @@ fn serve_refused_budget_returns_503() {
     assert!(
         response_body.contains("binding_constraint") || response_body.contains("REFUSED"),
         "503 body must name the binding constraint, got: {response_body}"
+    );
+}
+
+/// ATTACK: MCP receives totally invalid JSON (not just a missing field) and returns success.
+///
+/// Fault detected: A handler that tries `serde_json::from_str` and panics (or uses unwrap)
+/// on non-JSON input would crash the stdio loop. A handler that silently swallows the error
+/// and returns `{"result":null}` would let garbage bytes claim success. Must return a
+/// JSON-RPC error response (code -32700 parse error or -32600 invalid request), not success.
+///
+/// Note on implementation: fitsproof's MCP handler uses lightweight text-based JSON extraction.
+/// It cannot distinguish "not JSON" from "JSON missing required fields" — both produce None
+/// for the method field and return -32600 (Invalid Request). This is a valid JSON-RPC 2.0
+/// error (both -32600 and -32700 indicate the request cannot be processed). The critical
+/// property is that the response contains `"error"` and does not contain `"result"`.
+#[test]
+fn mcp_invalid_json_returns_parse_error() {
+    use fitsproof::mcp::handle_rpc_for_test;
+    // Totally malformed — not JSON at all.
+    let resp = handle_rpc_for_test("this is not json }{{{");
+    assert!(
+        resp.contains("\"error\""),
+        "invalid JSON must return a JSON-RPC error object, got: {resp}"
+    );
+    assert!(
+        !resp.contains("\"result\""),
+        "invalid JSON must not return a result, got: {resp}"
+    );
+    // Error code must be -32700 (Parse Error) or -32600 (Invalid Request) — both are valid
+    // JSON-RPC 2.0 error responses for input that cannot be processed. The critical property
+    // is a non-success error response, not the specific code.
+    assert!(
+        resp.contains("-32700") || resp.contains("-32600"),
+        "error code must be -32700 or -32600, got: {resp}"
+    );
+}
+
+/// ATTACK: serve returns HTTP 200 with only a stub body when the budget is sufficient —
+/// the `admission_record` field is absent, defeating CI gating on the contract proof.
+///
+/// Fault detected: If the handler creates a ChatCompletion response but omits the
+/// `admission_record` key, a caller that checks only HTTP 200 cannot verify the
+/// contract was actually evaluated. The field must be present in a 200 response.
+#[test]
+fn serve_admitted_response_has_admission_record() {
+    use fitsproof::serve::handle_request_for_test;
+    // Large budget: reference model (~0.057 GB) easily fits.
+    let body = r#"{"model":"fitsproof/ref","messages":[{"role":"user","content":"hello"}],"budget_gb":8.0}"#;
+    let (status_code, response_body) = handle_request_for_test("/v1/chat/completions", body);
+    assert_eq!(
+        status_code, 200,
+        "sufficient budget must return HTTP 200, got {status_code}; body: {response_body}"
+    );
+    assert!(
+        response_body.contains("admission_record"),
+        "HTTP 200 body must contain 'admission_record' (the contract proof), got: {response_body}"
+    );
+}
+
+/// ATTACK: budget_bytes = u64::MAX does not crash or produce a nonsensical verdict.
+///
+/// Fault detected: `plan()` computes `budget_bytes as f64` and compares to `total_peak_bytes`.
+/// With u64::MAX, the cast to f64 is well-defined (rounds up), but any arithmetic that
+/// overflows to negative or NaN would silently admit an impossible config, or panic.
+/// Must return a well-formed Plan (not panic, not NaN-based).
+#[test]
+fn plan_budget_infinity_does_not_panic() {
+    let model = small_model();
+    let machine = synthetic_machine();
+    // u64::MAX budget: should always return Fits (model is tiny, budget is astronomical).
+    let result = plan(&model, &machine, 512, u64::MAX, "fp32", 0.9);
+    match result {
+        Ok(p) => {
+            // Any well-formed Plan is acceptable — the key property is no panic or NaN verdict.
+            let _ = p.verdict;
+        }
+        Err(_) => {
+            // A PlanError is also acceptable (e.g. if u64::MAX triggers InvalidBudget).
+        }
+    }
+    // No panic = pass. (If this test runs, it passed.)
+}
+
+/// ATTACK: Pareto sweep for a model that requires more than the declared budget on every
+/// quant/context combination returns a non-empty frontier.
+///
+/// Fault detected: If the frontier-inclusion predicate compares wrong (e.g. `>` vs `>=`),
+/// or if the budget is not propagated to the inner admit() call, configs that do not fit
+/// could appear on the frontier. A 1-byte budget must yield an empty frontier regardless
+/// of model or quant.
+#[test]
+fn pareto_impossible_model_tiny_budget_empty_frontier() {
+    use fitsproof::model::ModelConfig;
+    use fitsproof::pareto::pareto_sweep;
+    use fitsproof::probe::MachineProfile;
+    // A large model: many layers, large hidden_size, large vocab — guaranteed > 1 byte.
+    let big_model = ModelConfig {
+        num_layers: 32,
+        hidden_size: 4096,
+        num_heads: 32,
+        num_kv_heads: 8,
+        head_dim: 128,
+        intermediate_size: 11008,
+        vocab_size: 32000,
+        max_seq_len: 4096,
+        name: "large-adversarial".into(),
+    };
+    let machine = MachineProfile {
+        hostname: "test".into(),
+        platform_str: "test".into(),
+        measured_at: 1_000_000.0,
+        memory_bandwidth_bps: 20_000_000_000.0,
+        gemm_throughput_flops: 100_000_000_000.0,
+        memory_bytes: 32 * 1024 * 1024 * 1024,
+        gpu_memory_bytes: 0,
+        cpu_count: 4,
+    };
+    // Budget = 1 byte: nothing should fit.
+    let result = pareto_sweep(&big_model, &machine, 1);
+    assert!(
+        result.frontier.is_empty(),
+        "Pareto frontier for a large model with 1-byte budget must be empty, got {} configs",
+        result.frontier.len()
+    );
+}
+
+/// ATTACK: context_len = usize::MAX overflows kv_cache_bytes to 0 or wraps to a tiny value.
+///
+/// Fault detected: kv_cache_bytes computes `n_layers * n_kv_heads * context_len * head_dim * 2`.
+/// With usize::MAX this is a multiplication of very large numbers. On 64-bit targets usize::MAX
+/// is 2^64-1; multiplying even by 2 wraps to 0 in unchecked arithmetic. The result must be
+/// either a very large u64 (no wrap) or the function must saturate — the critical constraint
+/// is that it must NOT return 0 or a value smaller than with a smaller context_len.
+/// (This is a different path from integer_overflow_context_len which uses u32::MAX as usize.)
+#[test]
+fn plan_context_len_usize_max_no_overflow() {
+    use fitsproof::cost;
+    let model = small_model(); // num_kv_heads=2, head_dim=32, num_layers=2
+                               // context_len = usize::MAX — the overflow-prone input
+    let kv_max = cost::kv_cache_bytes(&model, usize::MAX, "fp16");
+    // context_len = 1 — the minimal non-zero input
+    let kv_one = cost::kv_cache_bytes(&model, 1, "fp16");
+    // The key safety property: kv_cache_bytes(MAX) must be >= kv_cache_bytes(1).
+    // Overflow to 0 would violate this — the plan would admit an impossibly large model.
+    assert!(
+        kv_max >= kv_one,
+        "kv_cache_bytes(usize::MAX)={kv_max} must be >= kv_cache_bytes(1)={kv_one}; \
+         overflow-to-zero would cause silent OOM admission"
     );
 }

@@ -36,6 +36,8 @@ fitsproof plan --budget-gb 8 --quant int8 --context 4096
 fitsproof verify --budget-gb 4
 ```
 
+⭐ If this saves you a silent OOM, a star helps others find it.
+
 Static musl binary — no dynamic libraries, no runtime deps:
 
 ```bash
@@ -44,8 +46,6 @@ cargo build --release --target x86_64-unknown-linux-musl
 ldd target/x86_64-unknown-linux-musl/release/fitsproof
 # → "not a dynamic executable"
 ```
-
-⭐ If this saves you a silent OOM, a star helps others find it.
 
 ## Headline evidence
 
