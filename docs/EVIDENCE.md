@@ -8,20 +8,22 @@ Raw terminal output pasted verbatim.  Summaries are not evidence.
 
 ## 1. Budget refusal: refused config names the binding constraint and exits 2
 
-**Claim:** `fitsproof admit --budget-gb 0.001` refuses with a named binding constraint and exits 2.
+**Claim:** `fitsproof admit --budget-gb 0.001` refuses with a named binding constraint (weight/kv/activation breakdown) and exits 2.
 
 **Command:**
 ```
-./target/debug/fitsproof admit --budget-gb 0.001; echo "EXIT:$?"
+./target/release/fitsproof admit --budget-gb 0.001; echo "EXIT:$?"
 ```
 
 **Raw output:**
 ```
-REFUSED: needs 0.06 GB, budget 0.00 GB; no degradation fits
+REFUSED: needs 0.055 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.001 GB; no degradation fits
 EXIT:2
 ```
 
 **Status:** PASS
+
+**Note (updated c3-p09-improve-2):** Earlier versions of this entry showed `needs 0.06 GB, budget 0.00 GB` — the pre-ADV-1 format that omitted the component breakdown. The ADV-1 fix (c2-p08-improve-1) added the `weight=`/`kv=`/`activation=` fields and corrected the total from 0.06 to 0.055 GB. This entry has been updated to match the current binary output.
 
 ---
 

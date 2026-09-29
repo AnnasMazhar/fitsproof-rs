@@ -34,7 +34,10 @@ _print() {
 
 # ── 1. Build ────────────────────────────────────────────────────────────────
 _print "cargo build --release"
-cargo build --release 2>&1 | grep -E "Compiling|Finished"
+cargo build --release 2>&1 | grep -E "Compiling|Finished" || true
+# Note: grep exits 1 when there is nothing to recompile (Cargo prints nothing to filter).
+# The `|| true` ensures set -e does not kill the script in that case.
+# The binary is still valid — cargo exits 0, grep exit is the only non-zero here.
 
 FITSPROOF=./target/release/fitsproof
 
@@ -46,8 +49,11 @@ $FITSPROOF stress 2>&1 | tail -3
 # ── 3. Refuse a 1 MB budget ─────────────────────────────────────────────────
 echo ""
 _print "$FITSPROOF admit --budget-gb 0.001"
-$FITSPROOF admit --budget-gb 0.001 || true
-echo "exit code: $?"
+set +e
+$FITSPROOF admit --budget-gb 0.001
+_exit=$?
+set -e
+echo "exit code: $_exit"
 
 # ── 4. Admit a 4 GB budget ──────────────────────────────────────────────────
 echo ""

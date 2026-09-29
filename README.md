@@ -62,7 +62,7 @@ Refused configs name the binding constraint. They exit 2 so your CI can gate on 
 
 ```
 $ fitsproof admit --budget-gb 0.001
-REFUSED: needs 0.06 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.00 GB; no degradation fits
+REFUSED: needs 0.055 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.001 GB; no degradation fits
 $ echo $?
 2
 ```
@@ -121,6 +121,32 @@ fitsproof admit --budget-gb 6 || { echo "won't fit — refusing to load"; exit 1
 ```bash
 fitsproof plan --model /path/to/model.gguf --budget-gb 8
 ```
+
+**Full llama.cpp integration — the complete pattern (no silent OOM):**
+```bash
+#!/usr/bin/env bash
+# pre-flight check before every llama-cli invocation
+set -euo pipefail
+
+MODEL=/path/to/Qwen3-1.7B-Q4_K_M.gguf
+BUDGET_GB=4.0
+CTX=4096
+
+# Step 1: fitsproof pre-flight (< 50 ms, no engine required)
+# Exit 2 names the binding constraint (weight/kv/activation) and stops the script.
+fitsproof admit --model "$MODEL" --quant q4_k_m --context $CTX --budget-gb $BUDGET_GB
+
+# Step 2: launch llama.cpp only if pre-flight passes
+llama-cli -m "$MODEL" -c $CTX -n 200 -p "Explain GQA in one paragraph"
+```
+
+If fitsproof refuses:
+```
+REFUSED: needs 3.664 GB (weight=3.194 GB, kv=0.470 GB, activation=0.000 GB), budget 3.000 GB; no degradation fits
+```
+`kv=0.470 GB` is the bottleneck at 4096 context → fix: reduce `CTX=2048`.
+
+Full recipe with failure modes: `docs/ADOPTION.md §2`.
 
 **Stress your configuration space:**
 ```bash

@@ -650,3 +650,195 @@ test probe::tests::gemm_is_positive ... ok
 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 122 filtered out; finished in 38.60s
 ```
 
+
+
+---
+
+## c3-p09-improve-2 (cycle 3, pass 9) — 2026-09-29
+
+### Findings fixed
+
+Four adoption-readiness issues and one concrete integration example added in this pass.
+
+---
+
+### IMP-1 — EVIDENCE.md §1 shows stale pre-ADV-1 format (single biggest credibility gap)
+
+**Severity:** Major credibility gap (the first claim a reviewer reads is demonstrably wrong)
+
+**Root cause:** `docs/EVIDENCE.md §1` was never updated after the c2-p08-improve-1 ADV-1 fix.
+It still showed the old single-total format:
+```
+REFUSED: needs 0.06 GB, budget 0.00 GB; no degradation fits
+```
+
+But the current binary emits:
+```
+REFUSED: needs 0.055 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.001 GB; no degradation fits
+```
+
+Two discrepancies: (1) total changed from 0.06 to 0.055 GB; (2) component breakdown added;
+(3) budget display changed from 0.00 to 0.001 GB.  A skeptical reviewer runs `fitsproof admit
+--budget-gb 0.001` before reading anything else and sees output that doesn't match §1 of EVIDENCE.md.
+
+**Fix applied:**
+
+`docs/EVIDENCE.md §1` — updated to match current binary output: `needs 0.055 GB
+(weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.001 GB`. Note added explaining
+that earlier versions of the entry showed the pre-ADV-1 format.
+
+Raw terminal verification:
+```
+$ ./target/release/fitsproof admit --budget-gb 0.001; echo "EXIT:$?"
+REFUSED: needs 0.055 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.001 GB; no degradation fits
+EXIT:2
+```
+
+---
+
+### IMP-2 — README refusal message shows 0.06 GB with budget 0.00 GB (stale)
+
+**Severity:** Minor credibility gap (README evidence block doesn't match binary output)
+
+**Root cause:** `README.md §Headline evidence` refusal block showed:
+```
+REFUSED: needs 0.06 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.00 GB; no degradation fits
+```
+
+The component breakdown was correct (added post ADV-1) but the total (`0.06` vs `0.055`) and
+the budget (`0.00 GB` vs `0.001 GB`) were wrong. A stranger running the exact command from
+the README gets different output.
+
+**Fix applied:**
+
+`README.md` — refusal message updated to `0.055 GB` total and `0.001 GB` budget.
+
+---
+
+### IMP-3 — ADOPTION.md §2 Step 3 refusal format is fictional
+
+**Severity:** Minor credibility gap (shows format that the binary never emits)
+
+**Root cause:** ADOPTION.md §2 Step 3 showed:
+```
+REFUSED: needs 4.071 GB, budget 4.000 GB; binding constraint: kv_cache=0.500 GB
+```
+
+This format (`binding constraint: kv_cache=X`) is fictional — it was never the binary's output.
+The real binary emits `(weight=X kv=X activation=X)` in the body, not a named colon-separated
+field. An operator copying the recipe to a runbook would paste the wrong error format.
+
+**Fix applied:**
+
+`docs/ADOPTION.md §2 Step 3` — replaced fictional format with the real output format, plus
+added a sentence explaining what the component fields mean for diagnosis:
+```
+REFUSED: needs 4.071 GB (weight=3.194 GB, kv=0.877 GB, activation=0.000 GB), budget 4.000 GB; no degradation fits
+```
+
+---
+
+### IMP-4 — docs/demo.sh broken (set -euo pipefail kills on grep with nothing to compile)
+
+**Severity:** Minor adoption gap (the demo script advertised in README doesn't run)
+
+**Root cause:** `docs/demo.sh` ran `cargo build --release 2>&1 | grep -E "Compiling|Finished"`.
+With `set -euo pipefail`, when nothing needs recompiling Cargo emits nothing to grep and
+`grep` exits 1 — killing the script. A reviewer who already built the binary and runs the
+demo script gets an immediate exit with no output.
+
+Secondary issue: the refused step used `$FITSPROOF admit ... || true; echo "exit code: $?"`.
+`$?` captured the `true` exit (always 0), not the admit exit code.
+
+**Fix applied:**
+
+`docs/demo.sh`:
+- Build step: `grep ... || true` to absorb grep's exit 1 when no output matches.
+- Refuse step: `set +e` / run admit / capture `$_exit` / `set -e` / print `$_exit`.
+  This correctly shows `exit code: 2` for the refused config.
+
+Raw verification:
+```
+$ bash docs/demo.sh 2>&1 | grep -E "exit code:|REFUSED:|ADMITTED:|Stress harness:"
+Stress harness: 25 configs, 0 violations, 0 silent mode changes. ...
+REFUSED: needs 0.055 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.001 GB; no degradation fits
+exit code: 2
+ADMITTED: 0.055 GB predicted peak <= 4.000 GB budget (margin: 3944.9 MB)
+ADMITTED: 0.055 GB predicted peak <= 4.000 GB budget (margin: 3944.9 MB)
+```
+
+---
+
+### IMP-5 — README had no concrete llama.cpp integration recipe
+
+**Severity:** Minor adoption gap (README "How to plug it in" showed only Makefile/CI,
+no end-to-end bash script against a real named tool)
+
+**Root cause:** The README's "How to plug it in" section showed the `fitsproof admit` one-liner,
+the Makefile pattern, and the GitHub Actions snippet, but not a full two-step script pairing
+`fitsproof admit` with `llama-cli`. A stranger skimming the README doesn't see the end-to-end
+flow until they dig into ADOPTION.md.
+
+**Fix applied:**
+
+`README.md §How to plug it in` — added a full llama.cpp integration recipe showing:
+1. `fitsproof admit` pre-flight (exit 2 stops the script with the binding constraint named)
+2. `llama-cli` launch only if pre-flight passes
+3. What the refusal output looks like and which field (`kv=`) tells you to reduce `CTX`
+
+The recipe shows a real tool (`llama-cli`), a real model name (`Qwen3-1.7B-Q4_K_M.gguf`),
+and actionable steps. This is the concrete external-tool integration example the pass required.
+
+---
+
+### Before/after metrics
+
+| Metric | Before (c3-p08) | After (c3-p09-improve-2) | Delta |
+|--------|----------------|--------------------------|-------|
+| Tests run | 227 | 227 | 0 |
+| Test failures | 0 | 0 | 0 |
+| EVIDENCE.md §1 matches binary output | No (0.06 GB, no budget, old format) | Yes (0.055 GB, component breakdown, 0.001 GB budget) | Fixed |
+| README refusal message matches binary | No (0.06/0.00 GB) | Yes (0.055/0.001 GB) | Fixed |
+| ADOPTION.md refusal format matches binary | No (fictional `binding constraint: kv_cache=`) | Yes (real `weight=/kv=/activation=` format) | Fixed |
+| `bash docs/demo.sh` runs without error | No (set -e + grep = immediate exit) | Yes (exit code 2 shown correctly) | Fixed |
+| README has concrete llama.cpp recipe | No | Yes (full 2-step `admit` + `llama-cli` script) | Added |
+| `cargo clippy -D warnings` | PASS | PASS | — |
+| `cargo fmt --check` | PASS | PASS | — |
+
+### Raw terminal output
+
+```
+$ ~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]+ tests"
+running 129 tests
+test result: ok. 129 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 52.57s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 33 tests
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+running 30 tests
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 112.59s
+running 23 tests
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.70s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+```
+$ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings 2>&1
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.07s
+(exit 0 — clean)
+```
+
+```
+$ bash docs/demo.sh 2>&1 | grep -E "exit code:|REFUSED:|ADMITTED:|Stress harness:"
+Stress harness: 25 configs, 0 violations, 0 silent mode changes. Margin: min=10.0 MB, median=200.0 MB, max=1000.0 MB.
+REFUSED: needs 0.055 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.001 GB; no degradation fits
+exit code: 2
+ADMITTED: 0.055 GB predicted peak <= 4.000 GB budget (margin: 3944.9 MB)
+ADMITTED: 0.055 GB predicted peak <= 4.000 GB budget (margin: 3944.9 MB)
+```

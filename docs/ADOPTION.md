@@ -111,11 +111,11 @@ exit: 0
 or:
 
 ```
-REFUSED: needs 4.071 GB, budget 4.000 GB; binding constraint: kv_cache=0.500 GB
+REFUSED: needs 4.071 GB (weight=3.194 GB, kv=0.877 GB, activation=0.000 GB), budget 4.000 GB; no degradation fits
 exit: 2
 ```
 
-Exit 2 is catchable in a shell script, a Makefile, a CI job.
+Exit 2 is catchable in a shell script, a Makefile, a CI job. The component breakdown tells you which lever to pull: if `kv` dominates, reduce `--context`; if `weight` dominates, use a smaller model or lower quant.
 
 ### Step 4 — wrap your llama.cpp invocation
 
