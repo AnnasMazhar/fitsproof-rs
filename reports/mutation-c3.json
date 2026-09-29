@@ -1,0 +1,22 @@
+{
+  "cycle": 3,
+  "tool": "cargo-mutants",
+  "command": "/home/openclaw/.cargo/bin/cargo mutants --no-times --no-shuffle",
+  "rc": 1,
+  "killed": null,
+  "total": null,
+  "unviable": 0,
+  "kill_rate": null,
+  "score_raw": null,
+  "target": 0.7,
+  "tail": [
+    "Found 1241 mutants to test",
+    "Error: Failed to copy /home/openclaw/portfolio/fitsproof-rs/README.md to /tmp/cargo-mutants-fitsproof-rs-UDnBnw.tmp/README.md",
+    "",
+    "Caused by:",
+    "    Disk quota exceeded (os error 122)",
+    "",
+    "[cycle.py] outcomes.json parse failed: FileNotFoundError(2, 'No such file or directory')"
+  ],
+  "generated_at": 1790674255.389297
+}

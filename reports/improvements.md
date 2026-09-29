@@ -842,3 +842,158 @@ exit code: 2
 ADMITTED: 0.055 GB predicted peak <= 4.000 GB budget (margin: 3944.9 MB)
 ADMITTED: 0.055 GB predicted peak <= 4.000 GB budget (margin: 3944.9 MB)
 ```
+
+---
+
+## c4-p04-implement-1 (cycle 4, pass 4) — 2026-09-29
+
+### Findings fixed
+
+Three open findings from the cycle 3 adversarial review (ADV-9, ADV-11, ADV-12) addressed in this pass.
+
+---
+
+### ADV-11 — Silent `--context` default on unparseable input
+
+**Severity:** Minor (adversarial review c3-p11 rating)
+
+**Root cause:** `parse_context()` used `.and_then(|s| s.parse().ok()).unwrap_or(512)`. When the
+user passed `--context notanumber` or `--context 0`, the parse silently fell through to the
+512 default. The user received no feedback that their intended context length was ignored.
+
+**Fix applied:**
+
+`src/main.rs: parse_context()` — changed signature from `-> usize` inline to a new named function
+returning `Result<Option<usize>, String>`:
+- `Ok(None)` — flag not present; callers apply 512 default.
+- `Ok(Some(v))` — flag present and positive integer.
+- `Err(msg)` — flag present but invalid (non-integer or zero); callers emit the message and return exit 2.
+
+All three callers (`cmd_plan`, `cmd_admit`, `cmd_verify`) updated to match/handle the Result.
+
+**Tests added (7 total):**
+
+`tests/cmd_integration.rs`:
+- `adv11_invalid_context_exits_2_not_silent_default` — `--context notanumber` exits 2, stderr names `--context`
+- `adv11_zero_context_exits_2` — `--context 0` exits 2 (zero context is nonsensical)
+- `adv11_invalid_context_plan_exits_2` — same check on `plan` subcommand; stderr names `--context`
+
+Fault detected by each: `parse_context` silently returning `Ok(None)` (defaulting to 512) instead of `Err`.
+
+---
+
+### ADV-12 — Silent `--budget-gb` default on unparseable input
+
+**Severity:** Minor (adversarial review c3-p11 rating)
+
+**Root cause:** `parse_budget_gb()` used `.parse().ok()` and callers used `.unwrap_or(4.0)`. When the
+user passed `--budget-gb notanumber`, `--budget-gb -1`, or `--budget-gb 0`, the value fell through to
+the 4.0 default. The safety property was maintained (budget check was performed against 4.0 GB, not
+unlimited), but the user received no diagnostic that their intended budget was silently ignored.
+
+**Fix applied:**
+
+`src/main.rs: parse_budget_gb()` — changed return type to `Result<Option<f64>, String>`:
+- `Ok(None)` — flag not present; callers apply 4.0 default.
+- `Ok(Some(v))` — flag present and positive finite f64.
+- `Err(msg)` — flag present but invalid (non-numeric, negative, zero, or non-finite); callers emit and exit 2.
+
+All four callers (`cmd_plan`, `cmd_admit`, `cmd_verify`, `cmd_pareto`) updated to match/handle the Result.
+
+**Tests added (4 total):**
+
+`tests/cmd_integration.rs`:
+- `adv12_invalid_budget_exits_2_not_silent_default` — `--budget-gb notanumber` exits 2, stderr names `--budget-gb`
+- `adv12_negative_budget_exits_2` — `--budget-gb -1.0` exits 2, stderr names `--budget-gb`
+- `adv12_zero_budget_exits_2` — `--budget-gb 0` exits 2
+- `adv12_invalid_budget_plan_exits_2` — same check on `plan` subcommand; stderr names `--budget-gb`
+
+Fault detected by each: `parse_budget_gb` silently returning `Ok(None)` or accepting bad values.
+
+---
+
+### ADV-9 — int8/int4 scale KATs too loose to pin max_val to published constant
+
+**Severity:** Info (adversarial review c3-p1 rating)
+
+**Root cause:** `int8_round_trip_within_one_lsb` bounded round-trip error by `max_abs / 127.0`,
+but this tolerance is loose enough that changing max_val from 127 to 126 (or lower) shifts the
+scale by less than one LSB, passing the test. The constant 127 was not independently verified.
+
+**Fix applied:**
+
+`src/engine/quant.rs` — two new KATs added:
+
+`int8_scale_is_exact_known_answer`: for `weights=[1.0,-1.0,0.5,-0.5]`, asserts
+`scale == 1.0/127` to within `1e-7`. Ground truth: Dettmers et al. 2022 §2 — symmetric int8
+quantisation uses range `[-127, 127]`, so `scale = max_abs / 127`.
+
+`int4_scale_is_exact_known_answer`: for the same weights, asserts `scale == 1.0/7` to within
+`1e-6`. Ground truth: int4 symmetric range `[-7, 7]`.
+
+These tests fail immediately if max_val is changed from 127 to 126 (int8) or 7 to 6 (int4).
+
+---
+
+### Before/after metrics
+
+| Metric | Before (c3-p09) | After (c4-p04-implement-1) | Delta |
+|--------|----------------|----------------------------|-------|
+| Tests run | 227 | **236** | +9 |
+| Test failures | 0 | 0 | 0 |
+| ADV-11 status | open | **fixed** | resolved |
+| ADV-12 status | open | **fixed** | resolved |
+| ADV-9 status | info | **fixed** | resolved |
+| `--context notanumber` exits 2 | No (silent 512) | Yes | +UX safety |
+| `--budget-gb -1` exits 2 | No (silent 4.0) | Yes | +UX safety |
+| int8 max_val pinned by KAT | No | Yes | +fault coverage |
+| int4 max_val pinned by KAT | No | Yes | +fault coverage |
+| Open adversarial findings (minor) | 2 | **0** | −2 |
+| Open adversarial findings (info) | 1 (ADV-9) | **0** | −1 |
+| `cargo clippy -D warnings` | PASS | PASS | — |
+| `cargo fmt --check` | PASS | PASS | — |
+
+### Raw terminal output
+
+```
+$ ~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]+ tests"
+running 131 tests
+test result: ok. 131 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 40.87s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 33 tests
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+running 37 tests
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 152.36s
+running 23 tests
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.35s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+```
+$ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.68s
+(exit 0 — clean)
+```
+
+```
+$ ~/.cargo/bin/cargo fmt --check
+(no diff — exit 0)
+```
+
+```
+$ ./target/release/fitsproof admit --budget-gb 4 --context notanumber; echo "EXIT:$?"
+fitsproof admit: invalid --context value 'notanumber': expected a positive integer (e.g. 512)
+EXIT:2
+
+$ ./target/release/fitsproof admit --budget-gb -1.0; echo "EXIT:$?"
+fitsproof admit: invalid --budget-gb value '-1.0': must be a positive number (e.g. 4.0)
+EXIT:2
+```

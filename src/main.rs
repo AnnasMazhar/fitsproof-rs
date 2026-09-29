@@ -93,11 +93,23 @@ fn cmd_probe(_args: &[String]) -> ExitCode {
 // ---------------------------------------------------------------------------
 
 fn cmd_plan(args: &[String]) -> ExitCode {
-    let budget_gb = parse_budget_gb(args).unwrap_or(4.0);
+    let budget_gb = match parse_budget_gb(args) {
+        Ok(Some(v)) => v,
+        Ok(None) => 4.0,
+        Err(e) => {
+            eprintln!("fitsproof plan: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let quant = parse_flag(args, "--quant").unwrap_or_else(|| "none".to_string());
-    let context_len: usize = parse_flag(args, "--context")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(512);
+    let context_len: usize = match parse_context(args) {
+        Ok(Some(v)) => v,
+        Ok(None) => 512,
+        Err(e) => {
+            eprintln!("fitsproof plan: {e}");
+            return ExitCode::from(2);
+        }
+    };
 
     let cfg = match load_model_config(args, "plan") {
         Ok(c) => c,
@@ -136,11 +148,23 @@ fn cmd_plan(args: &[String]) -> ExitCode {
 // ---------------------------------------------------------------------------
 
 fn cmd_admit(args: &[String]) -> ExitCode {
-    let budget_gb = parse_budget_gb(args).unwrap_or(4.0);
+    let budget_gb = match parse_budget_gb(args) {
+        Ok(Some(v)) => v,
+        Ok(None) => 4.0,
+        Err(e) => {
+            eprintln!("fitsproof admit: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let quant = parse_flag(args, "--quant").unwrap_or_else(|| "none".to_string());
-    let context_len: usize = parse_flag(args, "--context")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(512);
+    let context_len: usize = match parse_context(args) {
+        Ok(Some(v)) => v,
+        Ok(None) => 512,
+        Err(e) => {
+            eprintln!("fitsproof admit: {e}");
+            return ExitCode::from(2);
+        }
+    };
 
     let cfg = match load_model_config(args, "admit") {
         Ok(c) => c,
@@ -174,12 +198,24 @@ fn cmd_admit(args: &[String]) -> ExitCode {
 // ---------------------------------------------------------------------------
 
 fn cmd_verify(args: &[String]) -> ExitCode {
-    let budget_gb = parse_budget_gb(args).unwrap_or(4.0);
+    let budget_gb = match parse_budget_gb(args) {
+        Ok(Some(v)) => v,
+        Ok(None) => 4.0,
+        Err(e) => {
+            eprintln!("fitsproof verify: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let budget_bytes = (budget_gb * 1e9) as u64;
     let quant = parse_flag(args, "--quant").unwrap_or_else(|| "none".to_string());
-    let context_len: usize = parse_flag(args, "--context")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(512);
+    let context_len: usize = match parse_context(args) {
+        Ok(Some(v)) => v,
+        Ok(None) => 512,
+        Err(e) => {
+            eprintln!("fitsproof verify: {e}");
+            return ExitCode::from(2);
+        }
+    };
 
     // When --model is given, warn that verify runs the reference bundle (v0.1 limitation).
     if parse_flag(args, "--model").is_some() {
@@ -291,7 +327,14 @@ fn cmd_mcp() -> ExitCode {
 // ---------------------------------------------------------------------------
 
 fn cmd_pareto(args: &[String]) -> ExitCode {
-    let budget_gb = parse_budget_gb(args).unwrap_or(4.0);
+    let budget_gb = match parse_budget_gb(args) {
+        Ok(Some(v)) => v,
+        Ok(None) => 4.0,
+        Err(e) => {
+            eprintln!("fitsproof pareto: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let budget_bytes = (budget_gb * 1e9) as u64;
     let cfg = ModelConfig::reference();
     let machine = synthetic_machine_or_probe();
@@ -435,13 +478,53 @@ fn cmd_stress() -> ExitCode {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn parse_budget_gb(args: &[String]) -> Option<f64> {
+/// Parse `--budget-gb <value>`.
+///
+/// Returns:
+/// - `Ok(None)` — flag not present; caller should apply a default.
+/// - `Ok(Some(v))` — flag present and parsed successfully.
+/// - `Err(msg)` — flag present but value is not a positive finite f64.
+fn parse_budget_gb(args: &[String]) -> Result<Option<f64>, String> {
     for i in 0..args.len().saturating_sub(1) {
         if args[i] == "--budget-gb" {
-            return args[i + 1].parse().ok();
+            let raw = &args[i + 1];
+            match raw.parse::<f64>() {
+                Ok(v) if v > 0.0 && v.is_finite() => return Ok(Some(v)),
+                Ok(_) => {
+                    return Err(format!(
+                        "invalid --budget-gb value '{raw}': must be a positive number (e.g. 4.0)"
+                    ))
+                }
+                Err(_) => {
+                    return Err(format!(
+                        "invalid --budget-gb value '{raw}': expected a number (e.g. 4.0)"
+                    ))
+                }
+            }
         }
     }
-    None
+    Ok(None)
+}
+
+/// Parse `--context <value>`.
+///
+/// Returns:
+/// - `Ok(None)` — flag not present; caller should apply a default.
+/// - `Ok(Some(v))` — flag present and parsed successfully.
+/// - `Err(msg)` — flag present but value is not a positive integer.
+fn parse_context(args: &[String]) -> Result<Option<usize>, String> {
+    match parse_flag(args, "--context") {
+        None => Ok(None),
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(v) if v > 0 => Ok(Some(v)),
+            Ok(_) => Err(format!(
+                "invalid --context value '{raw}': must be a positive integer (e.g. 512)"
+            )),
+            Err(_) => Err(format!(
+                "invalid --context value '{raw}': expected a positive integer (e.g. 512)"
+            )),
+        },
+    }
 }
 
 fn parse_flag(args: &[String], flag: &str) -> Option<String> {

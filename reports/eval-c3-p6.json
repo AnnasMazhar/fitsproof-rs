@@ -1,0 +1,24 @@
+{
+  "cycle": 3,
+  "pass": 6,
+  "tool": "cargo-test",
+  "command": "/home/openclaw/.cargo/bin/cargo test --all-targets",
+  "tests_run": 127,
+  "failures": 1,
+  "cargo_rc": 101,
+  "cargo_tail": [
+    "---- probe::tests::bandwidth_is_positive stdout ----",
+    "",
+    "thread 'probe::tests::bandwidth_is_positive' (919022) panicked at src/probe.rs:274:9:",
+    "bandwidth should be > 100 MB/s, got 4.39e7",
+    "",
+    "",
+    "failures:",
+    "    probe::tests::bandwidth_is_positive",
+    "",
+    "test result: FAILED. 127 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.94s",
+    "",
+    "error: test failed, to rerun pass `--lib`"
+  ],
+  "generated_at": 1790661658.9626124
+}

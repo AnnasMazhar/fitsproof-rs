@@ -1,0 +1,24 @@
+{
+  "cycle": 2,
+  "pass": 7,
+  "tool": "cargo-test",
+  "command": "/home/openclaw/.cargo/bin/cargo test --all-targets",
+  "tests_run": 187,
+  "failures": 0,
+  "cargo_rc": 0,
+  "cargo_tail": [
+    "",
+    "     Running tests/value/test_incumbent_gap.rs (target/debug/deps/test_incumbent_gap-8ba14b9724f09ca9)",
+    "",
+    "running 6 tests",
+    "test refused_below_any_degradation_fits ... ok",
+    "test binding_constraint_names_sizes ... ok",
+    "test degradation_record_describes_mode_change ... ok",
+    "test refused_config_is_not_degraded ... ok",
+    "test degraded_config_emits_degradation_record ... ok",
+    "test refused_config_names_binding_constraint ... ok",
+    "",
+    "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+  ],
+  "generated_at": 1790625881.0671203
+}

@@ -1586,7 +1586,7 @@ it claims to catch. All faults were reverted and the full test suite passes (227
 | ADV-6 | info | RESEARCH.md now has 46 sources across 6 passes | citation count | verification — all 8 sampled resolve |
 | ADV-7 | info | Direct cost module bypass is possible | API design review | limitation (documented design boundary) |
 | ADV-8 | info | mmap bypass would be possible if mmap is added | code review | v0.2 limitation (no mmap in v0.1) |
-| ADV-9 | info | int8_round_trip_within_one_lsb test does not detect off-by-one in max_val | fault injection (126 vs 127) | see analysis below |
+| ADV-9 | info | int8_round_trip_within_one_lsb test does not detect off-by-one in max_val | fault injection (126 vs 127) | **fixed (c4-p04: int8_scale_is_exact_known_answer + int4_scale_is_exact_known_answer)** |
 
 ---
 
@@ -1927,10 +1927,10 @@ test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 | ADV-6 | info | RESEARCH.md has 46+ sources | citation count | verification |
 | ADV-7 | info | Direct cost module bypass possible | API design | limitation (documented) |
 | ADV-8 | info | mmap bypass would be possible if mmap added | code review | v0.2 limitation |
-| ADV-9 | info | int8 round-trip test tolerance is loose | fault injection | minor test-quality |
+| ADV-9 | info | int8 round-trip test tolerance is loose | fault injection | **fixed (c4-p04: int8_scale_is_exact_known_answer + int4_scale_is_exact_known_answer)** |
 | ADV-10 | info | `inf` budget converts to u64::MAX | c3-p11 CLI test | limitation (valid behaviour) |
-| **ADV-11** | **minor** | **Unparseable `--context` silently falls back to 512** | c3-p11 CLI test | **open** |
-| **ADV-12** | **minor** | **Unparseable `--budget-gb` silently falls back to 4.0** | c3-p11 CLI test | **open** |
+| ADV-11 | minor | Unparseable `--context` silently falls back to 512 | c3-p11 CLI test | **fixed (c4-p04: parse_context Err + 3 tests adv11_*)** |
+| ADV-12 | minor | Unparseable `--budget-gb` silently falls back to 4.0 | c3-p11 CLI test | **fixed (c4-p04: parse_budget_gb Err + 4 tests adv12_*)** |
 
 ---
 

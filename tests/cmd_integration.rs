@@ -32,6 +32,13 @@
 //! | stress_output_has_margin_line | violation_free() && all_modes_explicit() → || (exit 0 when violated) |
 //! | stress_all_admitted_configs_ok | eff_budget * 4 replaced with + or /: degraded budget too small |
 //! | stress_1gb_configs_are_admitted | == AdmitStatus::Refused replaced with !=: admitted configs REFUSED |
+//! | adv11_invalid_context_exits_2_not_silent_default | parse_context returns None for non-integer (silently uses 512) |
+//! | adv11_zero_context_exits_2 | parse_context accepts 0 context length (nonsensical) |
+//! | adv11_invalid_context_plan_exits_2 | same silent-default on plan subcommand |
+//! | adv12_invalid_budget_exits_2_not_silent_default | parse_budget_gb returns None for non-numeric (silently uses 4.0) |
+//! | adv12_negative_budget_exits_2 | parse_budget_gb accepts negative value |
+//! | adv12_zero_budget_exits_2 | parse_budget_gb accepts zero (no budget constraint) |
+//! | adv12_invalid_budget_plan_exits_2 | same silent-default on plan subcommand |
 
 use std::process::Command;
 
@@ -735,5 +742,152 @@ fn mcp_responds_to_initialize() {
         output.status.success(),
         "mcp must exit 0 after stdin EOF, got: {:?}",
         output.status.code()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ADV-11: invalid --context errors loudly (does not silently default to 512)
+// ---------------------------------------------------------------------------
+
+/// Fault detected: parse_context silently returning None (using 512 default) when a
+/// non-integer value is passed for --context. ADV-11: user typo becomes silent wrong behavior.
+#[test]
+fn adv11_invalid_context_exits_2_not_silent_default() {
+    let out = binary()
+        .args(["admit", "--budget-gb", "4", "--context", "notanumber"])
+        .output()
+        .expect("failed to run fitsproof admit");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "invalid --context must exit 2, got: {:?}; stderr: {stderr}",
+        out.status.code()
+    );
+    assert!(
+        stderr.contains("--context"),
+        "error message must name '--context', got: {stderr:?}"
+    );
+}
+
+/// Fault detected: parse_context silently accepting zero (using it as a valid context).
+/// Zero context is nonsensical — an allocator would get context_len=0 KV cache.
+#[test]
+fn adv11_zero_context_exits_2() {
+    let out = binary()
+        .args(["admit", "--budget-gb", "4", "--context", "0"])
+        .output()
+        .expect("failed to run fitsproof admit");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "--context 0 must exit 2, got: {:?}; stderr: {stderr}",
+        out.status.code()
+    );
+}
+
+/// Fault detected: same silent-default on `plan` subcommand — parse_context returns None
+/// for non-integer, plan silently runs with ctx=512 instead of erroring.
+#[test]
+fn adv11_invalid_context_plan_exits_2() {
+    let out = binary()
+        .args(["plan", "--budget-gb", "4", "--context", "xyz"])
+        .output()
+        .expect("failed to run fitsproof plan");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "plan with invalid --context must exit 2, got: {:?}; stderr: {stderr}",
+        out.status.code()
+    );
+    assert!(
+        stderr.contains("--context"),
+        "plan error must name '--context', got: {stderr:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ADV-12: invalid --budget-gb errors loudly (does not silently default to 4.0)
+// ---------------------------------------------------------------------------
+
+/// Fault detected: parse_budget_gb returning None (using 4.0 default) when a non-numeric
+/// value is passed for --budget-gb. ADV-12: user typo becomes silent wrong budget.
+#[test]
+fn adv12_invalid_budget_exits_2_not_silent_default() {
+    let out = binary()
+        .args(["admit", "--budget-gb", "notanumber"])
+        .output()
+        .expect("failed to run fitsproof admit");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "invalid --budget-gb must exit 2, got: {:?}; stderr: {stderr}",
+        out.status.code()
+    );
+    assert!(
+        stderr.contains("--budget-gb"),
+        "error message must name '--budget-gb', got: {stderr:?}"
+    );
+}
+
+/// Fault detected: parse_budget_gb silently accepting a negative value, treating it
+/// as an f64 parse success and passing it downstream — negative budget is nonsensical.
+#[test]
+fn adv12_negative_budget_exits_2() {
+    let out = binary()
+        .args(["admit", "--budget-gb", "-1.0"])
+        .output()
+        .expect("failed to run fitsproof admit");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "--budget-gb -1.0 must exit 2, got: {:?}; stderr: {stderr}",
+        out.status.code()
+    );
+    assert!(
+        stderr.contains("--budget-gb"),
+        "error must name '--budget-gb', got: {stderr:?}"
+    );
+}
+
+/// Fault detected: parse_budget_gb silently accepting zero, treating as "no budget
+/// constraint" (fits everything), when zero budget must refuse everything.
+#[test]
+fn adv12_zero_budget_exits_2() {
+    let out = binary()
+        .args(["admit", "--budget-gb", "0"])
+        .output()
+        .expect("failed to run fitsproof admit");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "--budget-gb 0 must exit 2, got: {:?}; stderr: {stderr}",
+        out.status.code()
+    );
+}
+
+/// Fault detected: plan subcommand inheriting the same silent-default bug.
+/// parse_budget_gb returns None on non-numeric, plan silently uses 4.0.
+#[test]
+fn adv12_invalid_budget_plan_exits_2() {
+    let out = binary()
+        .args(["plan", "--budget-gb", "bad"])
+        .output()
+        .expect("failed to run fitsproof plan");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "plan with invalid --budget-gb must exit 2, got: {:?}; stderr: {stderr}",
+        out.status.code()
+    );
+    assert!(
+        stderr.contains("--budget-gb"),
+        "plan error must name '--budget-gb', got: {stderr:?}"
     );
 }

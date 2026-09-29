@@ -1012,3 +1012,134 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 - Mutation score: c2 scored 0.333 (limited by cargo-mutants timeout at 3600s, only main.rs tested).
   New cmd_integration tests cover 5 previously-missed cmd_stress mutants.
   Full mutation re-run targeting src/cost.rs + src/plan.rs + src/admit.rs needed in cycle 3 mutation pass.
+
+---
+
+## 38. c4-p04-implement-1: ADV-11/ADV-12 fixes — parse_context and parse_budget_gb now return Err on invalid input
+
+**Claim:** `--context notanumber`, `--context 0`, `--budget-gb notanumber`, `--budget-gb -1`, and
+`--budget-gb 0` all exit 2 with a diagnostic naming the flag. Previously they silently defaulted.
+
+**Command:**
+```
+./target/release/fitsproof admit --budget-gb 4 --context notanumber; echo "EXIT:$?"
+./target/release/fitsproof admit --budget-gb 4 --context 0; echo "EXIT:$?"
+./target/release/fitsproof plan --budget-gb 4 --context xyz; echo "EXIT:$?"
+./target/release/fitsproof admit --budget-gb notanumber; echo "EXIT:$?"
+./target/release/fitsproof admit --budget-gb -1.0; echo "EXIT:$?"
+./target/release/fitsproof admit --budget-gb 0; echo "EXIT:$?"
+./target/release/fitsproof plan --budget-gb notanumber; echo "EXIT:$?"
+```
+
+**Raw output:**
+```
+fitsproof admit: invalid --context value 'notanumber': expected a positive integer (e.g. 512)
+EXIT:2
+fitsproof admit: invalid --context value '0': must be a positive integer (e.g. 512)
+EXIT:2
+fitsproof plan: invalid --context value 'xyz': expected a positive integer (e.g. 512)
+EXIT:2
+fitsproof admit: invalid --budget-gb value 'notanumber': expected a number (e.g. 4.0)
+EXIT:2
+fitsproof admit: invalid --budget-gb value '-1.0': must be a positive number (e.g. 4.0)
+EXIT:2
+fitsproof admit: invalid --budget-gb value '0': must be a positive number (e.g. 4.0)
+EXIT:2
+fitsproof plan: invalid --budget-gb value 'notanumber': expected a number (e.g. 4.0)
+EXIT:2
+```
+
+**Status:** PASS — 7 new cmd_integration tests (adv11_* and adv12_*) all pass.
+
+---
+
+## 39. c4-p04-implement-1: ADV-9 fix — int8/int4 scale KATs pin max_val to published constant
+
+**Claim:** `int8_scale_is_exact_known_answer` and `int4_scale_is_exact_known_answer` detect
+changing max_val from 127 to 126 (int8) or 7 to 6 (int4) — a fault the loose LSB test missed.
+
+**Ground truth derivation:**
+- `weights = [1.0, -1.0, 0.5, -0.5]`, `max_abs = 1.0`
+- int8: `scale = 1.0 / 127 ≈ 0.00787402` (Dettmers et al. 2022 §2)
+- int4: `scale = 1.0 / 7 ≈ 0.14285714`
+
+**Command:**
+```
+~/.cargo/bin/cargo test --lib engine::quant::tests::int8_scale_is_exact_known_answer engine::quant::tests::int4_scale_is_exact_known_answer -- --nocapture 2>&1
+```
+
+**Raw output:**
+```
+running 2 tests
+test engine::quant::tests::int4_scale_is_exact_known_answer ... ok
+test engine::quant::tests::int8_scale_is_exact_known_answer ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 131 filtered out; finished in 6.50s
+```
+
+**Status:** PASS — 2 new KATs in src/engine/quant.rs.
+
+---
+
+## 40. c4-p04-implement-1: full test suite — 236 tests
+
+**Claim:** `cargo test --all-targets` is green with 236 tests after c4-p04.
+
+**Command:**
+```
+~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]+ tests"
+```
+
+**Raw output:**
+```
+running 131 tests
+test result: ok. 131 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 40.87s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 33 tests
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+running 37 tests
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 152.36s
+running 23 tests
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.35s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Status:** PASS — 236 tests (131 lib + 33 adversarial + 37 cmd_integration + 23 contract_mutants +
+1 real_model + 2 smoke + 3 stress + 6 value). +9 vs c3-p09 (227→236).
+
+---
+
+## 41. c4-p04-implement-1: clippy + fmt clean
+
+**Command:**
+```
+~/.cargo/bin/cargo clippy --all-targets -- -D warnings && ~/.cargo/bin/cargo fmt --check
+```
+
+**Raw output:**
+```
+    Checking fitsproof-rs v0.1.0 (...)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.68s
+(no fmt diff)
+```
+
+**Status:** PASS
+
+---
+
+## Open items / limitations (updated c4-p04)
+
+- Real-model generation (tokens, not just plan): `Weights::from_gguf()` now implemented.
+  Full end-to-end test requires `FITSPROOF_REAL_GGUF` env var pointing at a GGUF file.
+- Mutation score: c3 cargo-mutants failed due to disk quota (disk quota exceeded copying README.md
+  to /tmp). Mutation target ≥70% on core modules remains pending for the c4 mutation pass.
+- All open adversarial findings (ADV-9/ADV-11/ADV-12) are now fixed. ADV-10 is a documented
+  limitation (valid behaviour).
