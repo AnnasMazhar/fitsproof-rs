@@ -293,7 +293,11 @@ pub fn estimate(
     // KV cache is fp16 by default — independent of weight quantisation.
     let kv = kv_cache_bytes(cfg, context_len, "fp16");
     let act = activation_bytes(cfg);
-    let total = w + kv + act;
+    // Use saturating arithmetic to prevent wrapping on overflow (ADV-C5-P2-1).
+    // Without this, extreme context_len values cause kv_cache_bytes to saturate
+    // to u64::MAX, and then adding weight_bytes wraps to a small value, bypassing
+    // the budget check entirely.
+    let total = w.saturating_add(kv).saturating_add(act);
     let tok_s = decode_tok_s(cfg, machine, quant, bandwidth_utilisation);
     let ttft = prefill_ttft_s(cfg, machine, context_len, quant);
     let ai = arithmetic_intensity(cfg, quant);

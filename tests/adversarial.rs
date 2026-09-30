@@ -51,6 +51,8 @@
 //! | `pareto_admitted_count_matches_non_does_not_fit_frontier` | ParetoResult::admitted_configs must equal the count of non-DoesNotFit entries in the frontier — a wrong count misrepresents the feasibility surface. |
 //! | `mcp_probe_tool_response_contains_hostname_field` | MCP probe tool response must contain "hostname" and "memory_bytes" — a replace-body mutant returning an empty object is not caught by status-only checks. |
 //! | `serve_unknown_path_returns_404` | Unknown URL paths must return 404, not 200 or panic — the contract applies only to the documented endpoint. |
+//! | `estimate_addition_overflow_does_not_wrap_to_small_value` | ADV-C5-P2-1: Addition of w+kv+act must use saturating_add; regular `+` wraps u64::MAX + 53MB to ~53MB, bypassing the budget check entirely. |
+//! | `admit_refuses_extreme_context_len` | ADV-C5-P2-2: End-to-end verify that context_len=MAX is REFUSED, not ADMITTED due to overflow wrapping the total peak to a small value. |
 
 use fitsproof::admit::{admit, AdmitStatus};
 use fitsproof::cost;
@@ -1305,5 +1307,101 @@ fn serve_unknown_path_returns_404() {
     assert_eq!(
         status2, 404,
         "serve must return 404 for /v1/completions (not a supported endpoint), got status={status2}"
+    );
+}
+
+/// ADV-C5-P2-1: estimate() addition overflow bypass.
+///
+/// Fault detected: With context_len=usize::MAX, kv_cache_bytes() saturates to u64::MAX.
+/// Adding weight_bytes to u64::MAX using regular `+` causes wraparound: `u64::MAX + 53MB`
+/// wraps to ~53MB. This means a configuration requiring exabytes of memory is admitted
+/// to a 4GB budget — a total contract bypass.
+///
+/// The fix uses saturating_add: `w.saturating_add(kv).saturating_add(act)`, so the total
+/// remains at u64::MAX and is correctly refused.
+///
+/// This test is distinct from `plan_context_len_usize_max_no_overflow` which only checks
+/// that kv_cache_bytes() doesn't underflow to zero. Here we verify the downstream
+/// total_peak_bytes remains huge (>= kv_bytes alone), not wrapping to a small value.
+#[test]
+fn estimate_addition_overflow_does_not_wrap_to_small_value() {
+    use fitsproof::cost;
+    use fitsproof::model::ModelConfig;
+    use fitsproof::probe::MachineProfile;
+
+    let model = ModelConfig::reference();
+    let machine = MachineProfile {
+        hostname: "test".into(),
+        platform_str: "test".into(),
+        measured_at: 0.0,
+        memory_bandwidth_bps: 20_000_000_000.0,
+        gemm_throughput_flops: 100_000_000_000.0,
+        memory_bytes: 32 * 1024 * 1024 * 1024,
+        gpu_memory_bytes: 0,
+        cpu_count: 8,
+    };
+
+    // Normal context: ~55 MB total
+    let est_normal = cost::estimate(&model, &machine, 512, "none", 0.6);
+    // Overflow context: should be >= kv_cache_bytes alone (u64::MAX if saturated)
+    let est_overflow = cost::estimate(&model, &machine, usize::MAX, "none", 0.6);
+
+    // The critical property: total_peak_bytes with MAX context must NOT be smaller
+    // than with normal context. Before the fix, it wrapped to ~53 MB (smaller than 55 MB).
+    assert!(
+        est_overflow.total_peak_bytes >= est_normal.total_peak_bytes,
+        "ADV-C5-P2-1: total_peak_bytes(ctx=MAX)={} must be >= total_peak_bytes(ctx=512)={}; \
+         wrapping would allow silent budget bypass",
+        est_overflow.total_peak_bytes,
+        est_normal.total_peak_bytes
+    );
+
+    // Also verify it's actually huge — at least kv_cache_bytes (which saturates to u64::MAX)
+    let kv_max = cost::kv_cache_bytes(&model, usize::MAX, "fp16");
+    assert!(
+        est_overflow.total_peak_bytes >= kv_max,
+        "ADV-C5-P2-1: total_peak_bytes={} must be >= kv_cache_bytes={}",
+        est_overflow.total_peak_bytes,
+        kv_max
+    );
+}
+
+/// ADV-C5-P2-2: admit() must refuse extreme context_len, not admit it.
+///
+/// This is the end-to-end check: calling the CLI-equivalent flow must refuse when
+/// context_len=usize::MAX, because the predicted peak is u64::MAX bytes, which
+/// exceeds any practical budget.
+#[test]
+fn admit_refuses_extreme_context_len() {
+    use fitsproof::admit::{admit, AdmitStatus};
+    use fitsproof::model::ModelConfig;
+    use fitsproof::plan::plan;
+    use fitsproof::probe::MachineProfile;
+
+    let model = ModelConfig::reference();
+    let machine = MachineProfile {
+        hostname: "test".into(),
+        platform_str: "test".into(),
+        measured_at: 0.0,
+        memory_bandwidth_bps: 20_000_000_000.0,
+        gemm_throughput_flops: 100_000_000_000.0,
+        memory_bytes: 32 * 1024 * 1024 * 1024,
+        gpu_memory_bytes: 0,
+        cpu_count: 8,
+    };
+
+    // Budget: 4 GB — plenty for normal configs
+    let budget_bytes = 4 * 1024 * 1024 * 1024u64;
+
+    // This should be REFUSED because context_len=MAX causes astronomical peak
+    let p = plan(&model, &machine, usize::MAX, budget_bytes, "none", 0.6).unwrap();
+    let rec = admit(p);
+
+    assert_eq!(
+        rec.status,
+        AdmitStatus::Refused,
+        "ADV-C5-P2-2: context_len=MAX must be REFUSED, not {:?}. \
+         Before the fix, addition overflow wrapped the total to ~54 MB and it was ADMITTED.",
+        rec.status
     );
 }
