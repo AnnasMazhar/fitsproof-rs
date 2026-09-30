@@ -1242,3 +1242,161 @@ $ grep "COMPARISONS.md" README.md
   models, and actually generate text on real weights today. `docs/COMPARISONS.md` says exactly where
 See `docs/COMPARISONS.md` for the full table with current star counts and release dates. Short version:
 ```
+
+---
+
+## c5-p08-improve-1 (cycle 5, pass 8) — 2026-09-30
+
+### Finding fixed
+
+**Source:** RESEARCH.md §1933 (cycle 1 falsification log), OQ-C5-1 (cycle 5, pass 1 open question).
+
+**Severity:** Major accuracy bug — wrong dtype for embedding/unembed weights on quantised models.
+
+**Finding:** `weight_bytes()` used fp32 (4 bytes/element) for BOTH the input embedding table
+(`token_embd.weight`) AND the output projection (`output.weight` / unembed) regardless of the
+model quantisation format.  GGUF convention stores these tensors at fp16 (2 bytes/element) in
+quantised models; fp32 is only correct for `quant="none"`.
+
+**Impact:**
+- Llama-3.1-8B Q4_K_M: formula gave **7.69 GB** vs actual model file **~4.7 GB**.
+  Overcounting by ~3 GB caused `admit()` to refuse configs that would actually fit
+  (false-positive refusals — safe direction but ~64% prediction error).
+- Mechanism: `embed_bytes = V × d × 4.0` and `final_bytes = d × 4.0 + V × d × 4.0`.
+  For a 7B model (V = 128,256, d = 4,096), each fp32-vs-fp16 overcounting per copy = 1.05 GB.
+  Two copies (embed + unembed) = 2.1 GB excess per model.
+- Reference config (V = 512, d = 384): overcounting is 786 KB per copy — small, but proportional.
+
+**GGUF source:** llama.cpp `src/llama-model-loader.cpp` stores `token_embd.weight` and
+`output.weight` at their GGUF-declared tensor dtype, which is F16 for quantised GGUF files
+(not the transformer-layer quant and not F32).  Documented in RESEARCH.md §1933:
+"treat `token_embd.weight` and `output.weight` as fp16 regardless of the declared quant."
+
+### Fix applied
+
+`src/cost.rs: weight_bytes()` — introduced `embed_bpe` variable:
+
+```rust
+// Before (wrong for quantised models):
+let embed_bytes = v * d * 4.0;   // always fp32
+let final_bytes = d * 4.0 + v * d * 4.0;  // always fp32
+
+// After (correct: fp32 only for quant="none", fp16 for all other quants):
+let embed_bpe: f64 = if bits == 4.0 { 4.0 } else { 2.0 };
+let embed_bytes = v * d * embed_bpe;
+let final_bytes = d * 4.0 + v * d * embed_bpe;
+```
+
+`tests/contract_mutants.rs` docstring updated to reflect that embeddings now use fp16 for quant
+models (removing the outdated "embeddings stay fp32" claim).
+
+### New test added
+
+`src/cost.rs::tests::weight_bytes_embed_unembed_are_fp16_for_quant_models`
+
+**Fault detected:** `embed_bpe` set to `4.0` (fp32) for quantised models instead of `2.0` (fp16).
+
+**Regression proof:** Injecting `let embed_bpe: f64 = 4.0` (old behaviour) produces `8_080_896`
+for int4_sym, failing the test with:
+```
+assertion `left == right` failed: weight_bytes int4_sym: embed/unembed must be fp16 (2 bytes/elem);
+got 8080896, expected 7294464. If you get 8_080_896, the regression is present: embed_bpe was
+reverted to fp32 (4 bytes) for quantised models — overcounts by ~786 KB on this config,
+~2.1 GB per embedding copy on a 7B model.
+  left: 8080896
+ right: 7294464
+```
+
+**Ground truth (hand-computed, reference config 6L, 384H, 512V, int4_sym 0.5 bpe, fp16 embed):**
+- embed = 512 × 384 × 2 = 393,216 (fp16)
+- 6 layers: attn 196,608 + ffn 884,736 + norm 3,072 = 1,084,416/layer → 6,506,496
+- final norm = 384 × 4 = 1,536
+- unembed = 512 × 384 × 2 = 393,216 (fp16)
+- **Total = 7,294,464**
+
+**int8_sym (1.0 bpe, fp16 embed/unembed):**
+- embed = 512 × 384 × 2 = 393,216; unembed = 393,216
+- 6 layers: 2,165,760
+- Total = **13,782,528**
+
+**fp32 (bits = 4.0 → embed_bpe = 4.0): unchanged at 53,497,344**
+
+### Before/after metrics
+
+| Metric | Before (c5-p07 eval) | After (c5-p08-improve-1) | Delta |
+|--------|---------------------|--------------------------|-------|
+| Tests run | 268 | 269 | +1 |
+| Test failures | 0 | 0 | 0 |
+| `weight_bytes_embed_unembed_are_fp16_for_quant_models` | absent | **added** | +1 regression guard |
+| Llama-3.1-8B Q4_K_M prediction | 7.69 GB (fp32 embed) | 5.59 GB (fp16 embed) | **−2.10 GB** |
+| Error vs actual ~4.7 GB (7B Q4_K_M) | +3.0 GB (64% overcount) | +0.9 GB (19% overcount) | **−2.1 GB** |
+| Reference config int4_sym weight_bytes | 8,080,896 bytes | 7,294,464 bytes | −786,432 bytes (−9.7%) |
+| Reference config int8_sym weight_bytes | 14,568,960 bytes | 13,782,528 bytes | −786,432 bytes (−5.4%) |
+| Reference config fp32 weight_bytes | 53,497,344 bytes | 53,497,344 bytes | 0 (unchanged) |
+| `cargo clippy -D warnings` | PASS | PASS | — |
+| `cargo fmt --check` | PASS | PASS | — |
+
+### Raw terminal output
+
+```
+$ ~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]+ tests"
+running 132 tests
+test result: ok. 132 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.33s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 48 tests
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 38.36s
+running 44 tests
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 140.05s
+running 33 tests
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.25s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+```
+$ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings 2>&1 | tail -2
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.65s
+```
+
+```
+$ ~/.cargo/bin/cargo fmt --check 2>&1
+(no diff — exit 0)
+```
+
+```
+$ ./target/release/fitsproof admit --budget-gb 0.001; echo "EXIT:$?"
+REFUSED: needs 0.055 GB (weight=0.053 GB, kv=0.002 GB, activation=0.000 GB), budget 0.001 GB; no degradation fits
+EXIT:2
+```
+
+```
+$ ./target/release/fitsproof stress 2>&1 | tail -3
+ref/int8/ctx16/50MB: allocator_peak=0.0 MB, VmHWM=58.4 MB, delta=+1.7 MB, budget=50.0 MB, OK
+[REFUSED] ref/int4/ctx8/5MB: REFUSED: needs 0.008 GB (weight=0.007 GB, kv=0.000 GB, activation=0.000 GB), budget 0.005 GB; no degradation fits
+ref/fp16/ctx64/100MB: allocator_peak=0.0 MB, VmHWM=58.4 MB, delta=+1.7 MB, budget=100.0 MB, OK
+
+Stress harness: 25 configs, 0 violations, 0 silent mode changes. Margin: min=10.0 MB, median=200.0 MB, max=1000.0 MB.
+```
+
+**Regression proof — injecting old bug:**
+```
+$ # sed -i 's/if bits == 4.0 { 4.0 } else { 2.0 }/4.0/' src/cost.rs  (injected)
+$ ~/.cargo/bin/cargo test --lib cost::tests::weight_bytes_embed_unembed_are_fp16_for_quant_models -- --nocapture 2>&1 | tail -8
+
+thread 'cost::tests::weight_bytes_embed_unembed_are_fp16_for_quant_models' panicked at src/cost.rs:417:9:
+assertion `left == right` failed: weight_bytes int4_sym: embed/unembed must be fp16 (2 bytes/elem);
+got 8080896, expected 7294464. If you get 8_080_896, the regression is present: embed_bpe was
+reverted to fp32 (4 bytes) for quantised models — overcounts by ~786 KB on this config,
+~2.1 GB per embedding copy on a 7B model.
+  left: 8080896
+ right: 7294464
+test result: FAILED. 0 passed; 1 failed
+```
+
+---

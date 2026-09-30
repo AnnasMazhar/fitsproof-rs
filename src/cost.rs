@@ -85,10 +85,27 @@ pub struct CostEstimate {
 ///
 /// Norm weights stay fp32 regardless of quant (standard practice in quantised models).
 ///
+/// # Embedding and unembed dtype
+///
+/// `token_embd.weight` and `output.weight` are stored at the model's declared dtype, not
+/// at the quantisation format of the transformer layers.  For fp32 models (`quant="none"`)
+/// they are fp32 (4 bytes/element).  For all other quantisation formats (int8, int4,
+/// Q4_K_M, etc.) they are stored at fp16 (2 bytes/element) per GGUF convention — see
+/// llama.cpp `src/llama-model-loader.cpp` and the GGUF spec tensor_type field.
+///
+/// Using fp32 for embeddings on quantised models overcounts by `V × d_model × 2 bytes`
+/// per copy (embed + unembed) — ~2 GB for a 7B-class model with vocab = 128 K,
+/// hidden = 4096.  This would make `admit()` refuse configs that actually fit
+/// (false-positive refusals).
+///
+/// Source: RESEARCH.md §1933 — "treat `token_embd.weight` and `output.weight` as fp16
+/// regardless of the declared quant" (cross-referenced with llama.cpp source and GGUF spec).
+///
 /// # Fault detected
 ///
 /// Omitting the embedding table doubles the error for models with large vocabularies.
-/// Tests verify against a known-config reference (see `tests/cost_known_answer.rs`).
+/// Using fp32 (not fp16) for embeddings on quantised models overcounts by ~2 GB for 7B models.
+/// Tests verify against a known-config reference with exact hand-computed values.
 pub fn weight_bytes(cfg: &ModelConfig, quant: &str) -> u64 {
     let bits = QuantBits::from_name(quant)
         .expect("weight_bytes: unknown quant — caller must validate")
@@ -102,8 +119,13 @@ pub fn weight_bytes(cfg: &ModelConfig, quant: &str) -> u64 {
     let v = cfg.vocab_size as f64;
     let l = cfg.num_layers as f64;
 
-    // Embedding table (fp32 always)
-    let embed_bytes = v * d * 4.0;
+    // Embedding dtype: fp32 for fp32 models; fp16 for all quantised formats.
+    // Source: GGUF convention — token_embd.weight and output.weight stored at fp16 in
+    // quantised GGUF files (llama.cpp src/llama-model-loader.cpp; GGUF spec tensor_type).
+    let embed_bpe: f64 = if bits == 4.0 { 4.0 } else { 2.0 };
+
+    // Embedding table (embed_bpe bytes/element)
+    let embed_bytes = v * d * embed_bpe;
 
     // Per-layer attention: Q(h*hd*d) + K(kv_h*hd*d) + V(kv_h*hd*d) + O(d*h*hd)
     let attn_per_layer = (h * hd * d + kv_h * hd * d + kv_h * hd * d + d * h * hd) * bits;
@@ -114,8 +136,8 @@ pub fn weight_bytes(cfg: &ModelConfig, quant: &str) -> u64 {
     // Per-layer norms (fp32, 2 per layer)
     let norm_per_layer = 2.0 * d * 4.0;
 
-    // Final norm + unembed (fp32)
-    let final_bytes = d * 4.0 + v * d * 4.0;
+    // Final norm (fp32) + unembed (embed_bpe bytes/element — same dtype as embedding table)
+    let final_bytes = d * 4.0 + v * d * embed_bpe;
 
     (embed_bytes + l * (attn_per_layer + ffn_per_layer + norm_per_layer) + final_bytes) as u64
 }
@@ -335,7 +357,7 @@ mod tests {
     ///   per-layer total  = 1_572_864 + 7_077_888 + 3_072   =  8_653_824
     ///   6 layers         = 6 * 8_653_824                   = 51_922_944
     ///   final norm       = 384 * 4                         =      1_536
-    ///   unembed          = 512 * 384 * 4                   =    786_432
+    ///   unembed          = 512 * 384 * 4                   =    786_432  (fp32 — same as embed)
     ///   total = 786_432 + 51_922_944 + 1_536 + 786_432     = 53_497_344
     ///
     /// Source: formula from cost.rs weight_bytes(), traced term by term.
@@ -350,6 +372,77 @@ mod tests {
             wb, expected,
             "weight_bytes fp32 expected {expected}, got {wb}"
         );
+    }
+
+    /// Fault detected: embed and unembed use fp32 (4 bytes) instead of fp16 (2 bytes)
+    /// for quantised models, overcounting by ~2 GB for 7B-class models.
+    ///
+    /// GGUF convention: `token_embd.weight` and `output.weight` are stored at fp16 in
+    /// quantised GGUF files regardless of the transformer-layer quantisation format.
+    /// Source: RESEARCH.md §1933; llama.cpp src/llama-model-loader.cpp.
+    ///
+    /// This test is the REGRESSION GUARD: injecting `embed_bpe = 4.0` for int4_sym
+    /// (reverting to old fp32 embed behaviour) would produce 8_080_896 instead of
+    /// 7_294_464 — a 786_432-byte (768 KB) overcount on the tiny reference config,
+    /// scaling to ~2.1 GB overcount per copy for a 7B model (Llama-3.1-8B: 2 × 1.05 GB).
+    ///
+    /// Hand-computed for reference config (6L, 384H, 6Q-heads, 2KV-heads, 64 hd, 1536 ff, 512V)
+    /// at int4_sym (0.5 bytes/element for transformer layers; fp16 = 2 bytes for embed/unembed):
+    ///
+    ///   embed            = 512 * 384 * 2                    =    393_216  (fp16)
+    ///   attn Q/layer     = 6 * 64 * 384 * 0.5              =     73_728
+    ///   attn K/layer     = 2 * 64 * 384 * 0.5              =     24_576
+    ///   attn V/layer     = 2 * 64 * 384 * 0.5              =     24_576
+    ///   attn O/layer     = 384 * 6 * 64 * 0.5              =     73_728
+    ///   attn/layer total                                    =    196_608
+    ///   ffn gate/layer   = 1536 * 384 * 0.5                =    294_912
+    ///   ffn up/layer     = 1536 * 384 * 0.5                =    294_912
+    ///   ffn down/layer   = 384 * 1536 * 0.5                =    294_912
+    ///   ffn/layer total                                     =    884_736
+    ///   norm/layer       = 2 * 384 * 4                     =      3_072
+    ///   per-layer total  = 196_608 + 884_736 + 3_072       =  1_084_416
+    ///   6 layers         = 6 * 1_084_416                   =  6_506_496
+    ///   final norm       = 384 * 4                         =      1_536
+    ///   unembed          = 512 * 384 * 2                   =    393_216  (fp16 — same as embed)
+    ///   total = 393_216 + 6_506_496 + 1_536 + 393_216      =  7_294_464
+    ///
+    /// Source: GGUF convention (llama.cpp), RESEARCH.md §1933.
+    #[test]
+    fn weight_bytes_embed_unembed_are_fp16_for_quant_models() {
+        let cfg = ref_cfg();
+
+        // int4_sym: embed + unembed must be fp16 (2 bytes), not fp32 (4 bytes).
+        let int4 = weight_bytes(&cfg, "int4_sym");
+        let expected_int4: u64 = 7_294_464;
+        assert_eq!(
+            int4, expected_int4,
+            "weight_bytes int4_sym: embed/unembed must be fp16 (2 bytes/elem); \
+             got {int4}, expected {expected_int4}. \
+             If you get 8_080_896, the regression is present: embed_bpe was reverted to fp32 \
+             (4 bytes) for quantised models — overcounts by ~786 KB on this config, \
+             ~2.1 GB per embedding copy on a 7B model."
+        );
+
+        // int8_sym: same fp16 embed/unembed rule.
+        let int8 = weight_bytes(&cfg, "int8_sym");
+        let expected_int8: u64 = 13_782_528;
+        assert_eq!(
+            int8, expected_int8,
+            "weight_bytes int8_sym: embed/unembed must be fp16 (2 bytes/elem); \
+             got {int8}, expected {expected_int8}."
+        );
+
+        // fp32 model: embed + unembed stay fp32 (4 bytes/elem) — unchanged.
+        let fp32 = weight_bytes(&cfg, "none");
+        let expected_fp32: u64 = 53_497_344;
+        assert_eq!(
+            fp32, expected_fp32,
+            "weight_bytes fp32 must remain unchanged at {expected_fp32}; got {fp32}"
+        );
+
+        // Ordering invariant: int4 < int8 < fp32.
+        assert!(int4 < int8, "int4 ({int4}) must be < int8 ({int8})");
+        assert!(int8 < fp32, "int8 ({int8}) must be < fp32 ({fp32})");
     }
 
     /// Fault detected: factor 2 omitted from kv_cache_bytes (halves the estimate).

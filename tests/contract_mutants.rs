@@ -95,7 +95,8 @@ fn kv_cache_bytes_scales_with_kv_heads() {
 }
 
 /// Fault detected: weight_bytes int4 is NOT exactly half of int8 per element,
-/// because norms and embeddings stay fp32. Tests must verify the actual values.
+/// because norms stay fp32 and embeddings use fp16 (not fp32) for quant models.
+/// Tests must verify the actual values, not a simple ½ ratio.
 #[test]
 fn weight_bytes_int4_less_than_int8_less_than_fp32() {
     let cfg = ModelConfig::reference();
