@@ -1563,3 +1563,76 @@ CLEAN
 - Real-model generation (tokens, not just plan): `Weights::from_gguf()` implemented; full end-to-end requires `FITSPROOF_REAL_GGUF`.
 - Mutation score: c5 cost.rs run: 25/25 caught (100%). c5 main.rs timed out; 23 missed mutants now have killing tests. plan.rs and admit.rs mutation run pending (c6 mutation pass).
 - ADV-1, ADV-2 both fixed. No open blockers.
+
+---
+
+## 53. c6-p05-implement-2: 8 new adversarial tests + full suite green
+
+### New tests added (adversarial.rs, c6-p05)
+
+| Test | Fault detected |
+|------|----------------|
+| `gguf_poisoned_tensor_count_returns_error` | `read_tensor_infos` with tensor_count=10 and no tensor data must return Err (EOF) — not Ok with empty list |
+| `mcp_method_injection_string_returns_error` | Null byte or 100 KB method string must return JSON-RPC error, not panic |
+| `context_len_one_is_larger_than_zero_in_kv_bytes` | kv@1 > kv@0 and kv@2 > kv@1 — guards against (ctx-1) off-by-one formula |
+| `empty_quant_string_returns_unknown_quant_error` | `""` quant must be `PlanError::UnknownQuant`, not silent fp32 fallthrough |
+| `negative_budget_gb_is_refused_or_invalid_budget` | Negative budget → 0 bytes must be `Err(InvalidBudget)` or `DoesNotFit`, never `Fits` |
+| `nan_budget_gb_does_not_admit` | NaN budget → 0 bytes must not produce `Fits` or `FitsWithDegradation` |
+| `cost_module_matches_hand_computed_oracle` | Differential oracle: int8 < fp32, int4 < int8, kv linear in ctx, fp32 kv = 2× fp16 kv |
+| `allocator_high_contention_race_ceiling_respected` | 8 threads × 2 KB against 10 KB ceiling with dealloc-after-all-try — at most 5 succeed |
+
+**Command:**
+```
+~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]+ tests"
+```
+
+**Raw output:**
+```
+running 132 tests
+test result: ok. 132 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.50s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 58 tests
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 36.36s
+running 54 tests
+test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 182.35s
+running 45 tests
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.25s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Status:** PASS — 301 tests total (132 lib + 58 adversarial + 54 cmd_integration + 45 contract_mutants +
+1 real_model + 2 smoke + 3 stress + 6 value). +8 vs c6-p04 (293→301).
+
+---
+
+## 54. c6-p05-implement-2: clippy + fmt clean
+
+**Command:**
+```
+~/.cargo/bin/cargo clippy --all-targets -- -D warnings && ~/.cargo/bin/cargo fmt --check && echo "CLEAN"
+```
+
+**Raw output:**
+```
+    Checking fitsproof-rs v0.1.0 (...)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.27s
+CLEAN
+```
+
+**Status:** PASS
+
+---
+
+## Open items / limitations (updated c6-p05)
+
+- Real-model generation (tokens, not just plan): `Weights::from_gguf()` implemented; full end-to-end requires `FITSPROOF_REAL_GGUF`.
+- Mutation score: c5 cost.rs run: 25/25 caught (100%). c5 main.rs timed out; 23 missed mutants now have killing tests. plan.rs and admit.rs mutation run pending (c6 mutation pass).
+- ADV-1, ADV-2 both fixed. No open blockers.
+- Launch surfaces: COMPARISONS.md, CONTRIBUTING.md, docs/demo.sh, launch/topics.txt all complete.
