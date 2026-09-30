@@ -34,6 +34,18 @@ fitsproof plan --budget-gb 8 --quant int8 --context 4096
 
 # Verify peak RSS against a declared budget
 fitsproof verify --budget-gb 4
+
+# OpenAI-compatible server — every response carries an admission_record
+fitsproof serve --port 8080 &
+curl -s -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"fitsproof/ref","messages":[{"role":"user","content":"hi"}],"budget_gb":4}'
+# → {"admission_record":{"status":"admitted", ...}, ...}
+
+# MCP server — any MCP client can call probe/plan/admit
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"admit","arguments":{"budget_gb":4}}}' \
+  | fitsproof mcp
+# → {"result":{"content":[{"type":"text","text":{"status":"admitted",...}}]}}
 ```
 
 ⭐ If this saves you a silent OOM, a star helps others find it.
@@ -214,10 +226,10 @@ src/
   admit.rs           AdmitRecord, admit() — the enforcement point
   verify.rs          VerifyRecord, verify_run() — allocator_peak + VmHWM + delta
   gguf.rs            Minimal GGUF version 1, 2, 3 header reader → ModelConfig
-  client.rs          FitsproofClient, guard() — v0.2 Rust API surface
-  serve.rs           OpenAI-compatible HTTP server [v0.2]
-  mcp.rs             MCP stdio server [v0.2]
-  pareto.rs          Pareto frontier sweep [v0.2]
+  client.rs          FitsproofClient, guard() — Rust API surface (v0.2 mandate: binary + plugin)
+  serve.rs           OpenAI-compatible HTTP server (admission_record on every response)
+  mcp.rs             MCP stdio server (probe / plan / admit tools, JSON-RPC 2.0)
+  pareto.rs          Pareto frontier sweep (quant × context_len)
   engine/
     ops.rs           RMSNorm, RoPE, GQA attention, SwiGLU FFN, KV cache, linear
     quant.rs         int8_sym + int4_sym symmetric quantisation
@@ -244,9 +256,9 @@ fitsproof plan     # predict peak memory for a configuration and a budget
 fitsproof admit    # admit / degrade loudly / refuse (exit 2 on refusal, binding constraint named)
 fitsproof verify   # measure peak RSS + VmHWM, print both + delta, assert <= budget
 fitsproof stress   # >=20 configs: zero violations, zero silent mode changes
-fitsproof serve    # OpenAI-compatible HTTP server [v0.2]
-fitsproof mcp      # MCP stdio server [v0.2]
-fitsproof pareto   # Pareto frontier sweep [v0.2]
+fitsproof serve    # OpenAI-compatible HTTP server
+fitsproof mcp      # MCP stdio server (JSON-RPC 2.0 over stdin/stdout)
+fitsproof pareto   # Pareto frontier sweep (quant × context_len)
 
 fitsproof --version
 fitsproof --help
@@ -293,7 +305,7 @@ These are honest. A repo with no stated limitations is not credible.
 - **Real-model generation (v0.2).** The GGUF reader extracts architecture metadata and produces
   `plan()` predictions for real models. Loading tensor weights and running `generate()` on real
   weights requires a full weight tensor loader — a v0.2 scope item.
-- **serve / mcp / pareto not implemented.** Exit 2 with message in v0.1.
+- **Real-weight generation via `serve` / `mcp`.** The HTTP server and MCP server run the reference bundle (randomly-initialised weights). Serving real GGUF weights requires the full weight tensor loader — use `fitsproof plan` or `admit` with `--model` for real-model contract checks.
 - **KV cache bandwidth not in decode formula.** The decode formula counts weight streaming;
   KV cache access adds bandwidth at long contexts (known limitation, documented in the Python
   oracle too).
