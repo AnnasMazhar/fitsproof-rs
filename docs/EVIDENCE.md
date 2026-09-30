@@ -33,15 +33,19 @@ EXIT:2
 
 **Command:**
 ```
-./target/debug/fitsproof admit --budget-gb 4
+./target/release/fitsproof admit --budget-gb 4
 ```
 
 **Raw output:**
 ```
-ADMITTED: 0.057 GB predicted peak <= 4.000 GB budget (margin: 3943.3 MB)
+ADMITTED: 0.055 GB predicted peak <= 4.000 GB budget (margin: 3944.9 MB)
 ```
 
 **Status:** PASS
+
+**Note (updated c5-p09-improve-2):** Earlier versions of this entry showed `0.057 GB` and margin `3943.3 MB`.
+The c5-p08-improve-1 fix corrected embed/unembed dtype (fp32→fp16 for quantised models), reducing the
+reference config prediction from 0.057 GB to 0.055 GB and expanding the margin accordingly.
 
 ---
 
@@ -51,46 +55,56 @@ ADMITTED: 0.057 GB predicted peak <= 4.000 GB budget (margin: 3943.3 MB)
 
 **Command:**
 ```
-./target/debug/fitsproof stress
+./target/release/fitsproof stress
 ```
 
 **Raw output (last 5 lines + summary):**
 ```
-ref/int8/ctx16/50MB: allocator_peak=0.0 MB, VmHWM=58.6 MB, delta=+1.9 MB, budget=50.0 MB, OK
-[REFUSED] ref/int4/ctx8/5MB: REFUSED: needs 0.01 GB, budget 0.01 GB; no degradation fits
-ref/fp16/ctx64/100MB: allocator_peak=0.0 MB, VmHWM=58.6 MB, delta=+1.9 MB, budget=100.0 MB, OK
+ref/fp32/ctx8/200MB: allocator_peak=0.0 MB, VmHWM=58.5 MB, delta=+1.8 MB, budget=200.0 MB, OK
+ref/int8/ctx16/50MB: allocator_peak=0.0 MB, VmHWM=58.5 MB, delta=+1.8 MB, budget=50.0 MB, OK
+[REFUSED] ref/int4/ctx8/5MB: REFUSED: needs 0.007 GB (weight=0.007 GB, kv=0.000 GB, activation=0.000 GB), budget 0.005 GB; no degradation fits
+ref/fp16/ctx64/100MB: allocator_peak=0.0 MB, VmHWM=58.5 MB, delta=+1.8 MB, budget=100.0 MB, OK
 
 Stress harness: 25 configs, 0 violations, 0 silent mode changes. Margin: min=10.0 MB, median=200.0 MB, max=1000.0 MB.
 ```
 
 **Status:** PASS
 
+**Note (updated c5-p09-improve-2):** Earlier versions showed `needs 0.01 GB, budget 0.01 GB` (pre-component-breakdown format, pre-embed-fix values). The c5-p08-improve-1 embed/unembed dtype correction reduced the int4 reference config prediction (component breakdown: weight=0.007 GB is the binding constraint for the refused case).
+
 ---
 
-## 4. cargo test all-green: 67 lib + 3 stress + 2 smoke + 1 real_model tests
+## 4. cargo test all-green: 269 tests across all targets
 
 **Claim:** `cargo test` is green on a fresh build.
 
 **Command:**
 ```
-cargo test 2>&1 | grep -E "test result:|running [0-9]"
+~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]+ tests"
 ```
 
-**Raw output:**
+**Raw output (c5-p08-improve-1 run):**
 ```
-running 67 tests
-test result: ok. 67 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.10s
+running 132 tests
+test result: ok. 132 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.33s
 running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-running 1 test
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
+running 48 tests
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 38.36s
+running 44 tests
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 140.05s
+running 33 tests
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
 running 2 tests
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 running 3 tests
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 46.94s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.25s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
 
-**Status:** PASS
+**Status:** PASS — 269 tests total (132 lib + 48 adversarial + 44 cmd_integration + 33 contract_mutants + 1 real_model + 2 smoke + 3 stress + 6 value)
 
 ---
 
@@ -123,12 +137,18 @@ Reading GGUF: /build/.cache/qmd/models/hf_tobil_qmd-query-expansion-1.7B-q4_k_m.
     num_kv_heads: 8, head_dim: 128, intermediate_size: 6144, vocab_size: 151936,
     max_seq_len: 40960, name: "hf_tobil_qmd-query-expansion-1.7B-q4_k_m" }
   Verdict:        Fits
-  Predicted peak: 3.209 GB
+  Predicted peak: 2.009 GB
   Budget:         4.000 GB
 test real_gguf_model_plan_succeeds ... ok
 ```
 
 **Status:** PASS
+
+**Note (updated c5-p09-improve-2):** Earlier versions of this entry showed `Predicted peak: 3.209 GB`.
+The c5-p08-improve-1 fix corrected embed/unembed dtype (fp32→fp16 for quantised models). For this
+Qwen3-1.7B model (vocab_size=151,936, hidden_size=2048), the fp16 correction removes ≈1.2 GB from
+the two embedding copies (embed + unembed), reducing the prediction from 3.209 GB to 2.009 GB.
+The 2.009 GB prediction is the current value; 3.209 GB is stale and incorrect.
 
 **Note on full engine run:** The reference bundle engine (randomly-initialised weights,
 512 vocab) runs `generate()` in tests and the CLI. Running the real Qwen3 weights requires
@@ -145,20 +165,25 @@ on real weights is a v0.2 scope item.
 
 **Command:**
 ```
-./target/debug/fitsproof verify --budget-gb 4
+./target/release/fitsproof verify --budget-gb 4
 ```
 
 **Raw output:**
 ```
-ADMITTED: 0.057 GB predicted peak <= 4.000 GB budget (margin: 3943.3 MB)
+ADMITTED: 0.055 GB predicted peak <= 4.000 GB budget (margin: 3944.9 MB)
 allocator_peak: 0.000 GB
 VmHWM:          0.057 GB
-delta:          +0.5 MB (VmHWM - allocator_peak)
+delta:          +0.1 MB (VmHWM - allocator_peak)
 budget:         4.000 GB
 budget_respected: true
 ```
 
 **Status:** PASS
+
+**Note (updated c5-p09-improve-2):** Earlier versions of this entry showed `0.057 GB` predicted peak, margin
+`3943.3 MB`, and delta `+0.5 MB`. The c5-p08-improve-1 embed/unembed dtype fix reduced the reference config
+prediction to 0.055 GB. VmHWM (0.057 GB) reflects the actual Rust runtime RSS and is stable;
+the delta narrowed to +0.1 MB because the predicted peak moved closer to the OS-measured high water mark.
 
 ---
 
@@ -530,14 +555,14 @@ always used — making the ADOPTION.md integration recipe fictional.
 
 **Command (plan):**
 ```
-./target/debug/fitsproof plan --model /home/openclaw/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
+./target/release/fitsproof plan --model /home/openclaw/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
   --budget-gb 8 --quant q4_k_m --context 4096
 ```
 
 **Raw output:**
 ```
 Verdict:         Fits
-Predicted peak:  3.664 GB
+Predicted peak:  2.420 GB
 Budget:          8.000 GB
 Quant:           q4_k_m
 Context length:  4096
@@ -545,29 +570,31 @@ Context length:  4096
 
 **Command (admit — fits):**
 ```
-./target/debug/fitsproof admit --model /home/openclaw/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
-  --budget-gb 8 --quant q4_k_m --context 4096; echo "exit: $?"
+./target/release/fitsproof admit --model /home/openclaw/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
+  --budget-gb 4 --quant q4_k_m --context 4096; echo "exit: $?"
 ```
 
 **Raw output:**
 ```
-ADMITTED: 3.664 GB predicted peak <= 8.000 GB budget (margin: 4335.8 MB)
+ADMITTED: 2.420 GB predicted peak <= 4.000 GB budget (margin: 1580.4 MB)
 exit: 0
 ```
 
 **Command (admit — refused):**
 ```
-./target/debug/fitsproof admit --model /home/openclaw/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
-  --budget-gb 0.5 --quant q4_k_m --context 4096; echo "exit: $?"
+./target/release/fitsproof admit --model /home/openclaw/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
+  --budget-gb 2.0 --quant q4_k_m --context 4096; echo "exit: $?"
 ```
 
 **Raw output:**
 ```
-REFUSED: needs 3.66 GB, budget 0.50 GB; no degradation fits
+REFUSED: needs 2.420 GB (weight=1.950 GB, kv=0.470 GB, activation=0.000 GB), budget 2.000 GB; no degradation fits
 exit: 2
 ```
 
 **Status:** PASS — real GGUF → real ModelConfig → real plan prediction via CLI.
+
+**Note (updated c5-p09-improve-2):** Earlier versions showed `Predicted peak: 3.664 GB` and `ADMITTED: 3.664 GB`. The c5-p08-improve-1 embed/unembed dtype fix (fp32→fp16 for quantised models) reduced the prediction by ~1.24 GB for this Qwen3-1.7B model (large vocab: 151,936 tokens → two fp16 embedding copies each ≈ 0.62 GB vs the old fp32 estimate). The current prediction is 2.420 GB.
 
 ---
 

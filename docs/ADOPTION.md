@@ -506,7 +506,7 @@ This makes our total prediction safely conservative: 0.85 GB predicted vs
 
 Wait — conservative (over-prediction) means more likely to refuse than OOM.
 This is the SAFE direction. The plan() output in EVIDENCE.md §21:
-  fitsproof plan → 3.664 GB (with full metadata + fp16 embedding correction not yet applied)
+  fitsproof plan → 2.420 GB (with full metadata + fp16 embedding correction applied in c5-p08)
   vs real file 1.12 GB implies the overestimate is in KV cache + context + runtime, not
   a purely conservative undercount.
 ```
@@ -565,8 +565,8 @@ fn load_model(path: &str) -> Result<Weights, Box<dyn std::error::Error>> {
 
 On refusal:
 ```
-GuardError: budget exceeded — predicted peak 3.664 GB > budget 4.000 GB;
-  binding constraint: weight_bytes (3.206 GB)
+GuardError: budget exceeded — predicted peak 2.420 GB > budget 2.000 GB;
+  binding constraint: weight_bytes (1.950 GB)
 ```
 
 `guard()` uses the `?` operator and propagates as `Box<dyn Error>`.  This is the natural
@@ -664,7 +664,7 @@ Response:
   "content": [
     {
       "type": "text",
-      "text": "REFUSED: needs 3.664 GB, budget 4.0 GB — fits with margin 336 MB"
+      "text": "REFUSED: needs 2.420 GB, budget 2.0 GB — does not fit; no degradation fits"
     }
   ],
   "isError": false
@@ -774,7 +774,7 @@ pages bypass `GlobalAlloc`.  The admission ceiling (installed before serving beg
 not cover mmap'd weight pages.
 
 **Impact:** `allocator_peak` in the response headers will undercount peak memory.  The
-advertised budget guarantee (`X-Fitsproof-Predicted-Gb: 3.209; X-Fitsproof-Budget-Gb: 4.000;
+advertised budget guarantee (`X-Fitsproof-Predicted-Gb: 2.009; X-Fitsproof-Budget-Gb: 4.000;
 X-Fitsproof-Verdict: fits`) is based on the analytical prediction, not on a live allocator
 measurement that covers the mmap allocation.
 

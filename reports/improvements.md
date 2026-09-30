@@ -1245,7 +1245,232 @@ See `docs/COMPARISONS.md` for the full table with current star counts and releas
 
 ---
 
-## c5-p08-improve-1 (cycle 5, pass 8) — 2026-09-30
+## c5-p09-improve-2 (cycle 5, pass 9) — 2026-09-30
+
+### Root cause
+
+The c5-p08-improve-1 pass corrected embed/unembed dtype (fp32→fp16 for quantised models),
+reducing predictions by ~1–2 GB for large-vocab models.  This fix cascaded into stale output
+in README, EVIDENCE.md, and ADOPTION.md — where raw terminal output quoted the old pre-fix
+predictions.  A skeptical reviewer running the binary saw different output from every quoted
+block.
+
+### Single biggest credibility gap
+
+**README verify block and real_model block showed stale pre-c5-p08 predictions.**
+
+- `fitsproof verify --budget-gb 4` quoted `0.057 GB` and `3943.3 MB margin` — binary now
+  outputs `0.055 GB` and `3944.9 MB`.
+- Real model block quoted `Predicted peak: 3.209 GB` — binary now returns `2.009 GB` for the
+  same model (hf_tobil Qwen3-1.7B Q4_K_M).
+- llama.cpp recipe quoted `REFUSED: needs 3.664 GB … budget 3.000 GB` — post-fix the model is
+  only `2.420 GB`, so the exact command now returns `ADMITTED`, making the example factually
+  wrong.  Changed the recipe to use `BUDGET_GB=2.0` to show a real refusal at the correct
+  prediction value.
+
+All discrepancies are direct consequences of the c5-p08 embed/unembed fix.
+
+---
+
+### IMP-1 — README verify block stale (biggest credibility gap)
+
+**Severity:** Major (the first thing a reviewer tries from the README gives different output)
+
+**Fix:**
+
+`README.md §Headline evidence` — verify block updated to current binary output:
+
+Before (wrong — pre-c5-p08):
+```
+ADMITTED: 0.057 GB predicted peak <= 4.000 GB budget (margin: 3943.3 MB)
+...
+delta:          +0.5 MB (VmHWM - allocator_peak)
+```
+
+After (correct — current binary):
+```
+ADMITTED: 0.055 GB predicted peak <= 4.000 GB budget (margin: 3944.9 MB)
+...
+delta:          +0.1 MB (VmHWM - allocator_peak)
+```
+
+Raw terminal verification:
+```
+$ ./target/release/fitsproof verify --budget-gb 4
+ADMITTED: 0.055 GB predicted peak <= 4.000 GB budget (margin: 3944.9 MB)
+allocator_peak: 0.000 GB
+VmHWM:          0.057 GB
+delta:          +0.1 MB (VmHWM - allocator_peak)
+budget:         4.000 GB
+budget_respected: true
+```
+
+---
+
+### IMP-2 — README real_model block stale
+
+**Severity:** Major (real model test output doesn't match README quote)
+
+**Fix:**
+
+`README.md §Headline evidence` — real model block updated:
+- `Predicted peak: 3.209 GB` → `Predicted peak: 2.009 GB`
+
+Raw terminal verification:
+```
+$ FITSPROOF_REAL_GGUF=~/.cache/qmd/models/hf_tobil_qmd-query-expansion-1.7B-q4_k_m.gguf \
+    cargo test --test real_model -- --nocapture 2>&1 | grep "Predicted"
+  Predicted peak: 2.009 GB
+```
+
+---
+
+### IMP-3 — README llama.cpp recipe shows wrong refused output
+
+**Severity:** Major (the recipe's refused example uses budget=3.0 GB, but the model now fits at 3.0 GB after the embed fix — running the exact command gives ADMITTED, not REFUSED)
+
+**Root cause:** c5-p08 reduced Qwen3-1.7B prediction from 3.664 GB to 2.420 GB. The recipe's
+"example refusal" at budget 3.0 GB is now an admission. The recipe comment `kv=0.470 GB is
+the bottleneck` is still accurate — it explains the KV contribution — but the example output
+was factually wrong.
+
+**Fix:**
+
+`README.md §How to plug it in` — recipe updated to use budget 2.0 GB (gives a hard refusal):
+
+```
+REFUSED: needs 2.420 GB (weight=1.950 GB, kv=0.470 GB, activation=0.000 GB), budget 2.000 GB; no degradation fits
+```
+
+Raw terminal verification:
+```
+$ ./target/release/fitsproof admit \
+    --model ~/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
+    --quant q4_k_m --context 4096 --budget-gb 2.0; echo "EXIT:$?"
+REFUSED: needs 2.420 GB (weight=1.950 GB, kv=0.470 GB, activation=0.000 GB), budget 2.000 GB; no degradation fits
+EXIT:2
+```
+
+---
+
+### IMP-4 — README architecture tree cmd_integration count wrong
+
+**Severity:** Minor (claims 37 tests; actual count is 44 after c5-p08 additions)
+
+**Fix:**
+
+`README.md §Architecture` — updated:
+- `cmd_integration.rs 37 CLI integration tests` → `cmd_integration.rs 44 CLI integration tests`
+
+Raw terminal verification:
+```
+$ ~/.cargo/bin/cargo test --test cmd_integration 2>&1 | grep "test result"
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 142.89s
+```
+
+---
+
+### IMP-5 — EVIDENCE.md §2, §3, §4, §5, §6, §21 stale
+
+**Severity:** Major (primary evidence register shows pre-fix predictions)
+
+Six sections updated:
+- **§2** (admitted): `0.057 GB / 3943.3 MB` → `0.055 GB / 3944.9 MB` with explanatory note
+- **§3** (stress): updated refused-config output to include component breakdown (`weight=0.007 GB, kv=0.000 GB, activation=0.000 GB`); updated to use `./target/release/` path
+- **§4** (test counts): `67 lib + 3 stress + 2 smoke + 1 real_model` → `269 tests total (132+48+44+33+1+2+3+6)`
+- **§5** (real model): `3.209 GB` → `2.009 GB` with note explaining the c5-p08 correction
+- **§6** (verify): `0.057 GB / +0.5 MB` → `0.055 GB / +0.1 MB` with explanatory note
+- **§21** (real GGUF CLI): `3.664 GB → 2.420 GB`, refused budget changed `0.5 → 2.0 GB`, ADMITTED budget changed `8 → 4 GB` with note
+
+---
+
+### IMP-6 — ADOPTION.md §8.2, §9.1, §9.3, §11.1 stale predictions
+
+**Severity:** Minor (secondary document; same root cause as README/EVIDENCE staleness)
+
+Four instances updated:
+- §8.2: `fitsproof plan → 3.664 GB` → `2.420 GB` (with note: fp16 correction applied in c5-p08)
+- §9.1: `GuardError: predicted peak 3.664 GB > budget 4.000 GB` → `2.420 GB > 2.000 GB` (consistent with new refused budget)
+- §9.3: MCP refused text `needs 3.664 GB` → `needs 2.420 GB, budget 2.0 GB`
+- §11.1: `X-Fitsproof-Predicted-Gb: 3.209` → `2.009` (real model prediction in serve headers example)
+
+---
+
+### Before/after metrics
+
+| Metric | Before (c5-p08) | After (c5-p09-improve-2) | Delta |
+|--------|----------------|--------------------------|-------|
+| Tests run | 269 | 269 | 0 |
+| Test failures | 0 | 0 | 0 |
+| README verify output matches binary | No (0.057 GB / +0.5 MB) | Yes (0.055 GB / +0.1 MB) | Fixed |
+| README real_model output matches binary | No (3.209 GB) | Yes (2.009 GB) | Fixed |
+| README llama.cpp recipe refused example matches binary | No (3.664 GB at budget 3.0 → would ADMIT) | Yes (2.420 GB at budget 2.0 → REFUSED, exit 2) | Fixed |
+| README architecture tree cmd_integration count | 37 (wrong) | 44 (correct) | Fixed |
+| EVIDENCE.md §2 admitted output matches binary | No (0.057 GB) | Yes (0.055 GB) | Fixed |
+| EVIDENCE.md §3 stress refused format matches binary | No (old format, pre-breakdown) | Yes (component breakdown) | Fixed |
+| EVIDENCE.md §4 test count | 67 lib (stale) | 269 total (current) | Fixed |
+| EVIDENCE.md §5 real model prediction | 3.209 GB (stale) | 2.009 GB (current) | Fixed |
+| EVIDENCE.md §6 verify output matches binary | No (0.057 GB / +0.5 MB) | Yes (0.055 GB / +0.1 MB) | Fixed |
+| EVIDENCE.md §21 real GGUF prediction | 3.664 GB (stale) | 2.420 GB (current) | Fixed |
+| ADOPTION.md stale prediction instances | 4 | 0 | Fixed |
+| Error messages actionable (file not found, bad quant, bad context, bad budget) | Yes | Yes | Unchanged |
+| `cargo clippy -D warnings` | PASS | PASS | — |
+| `cargo fmt --check` | PASS | PASS | — |
+
+### Raw terminal output
+
+```
+$ ~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]+ tests"
+running 132 tests
+test result: ok. 132 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.82s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 48 tests
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.65s
+running 44 tests
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 138.92s
+running 33 tests
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.07s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+```
+$ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings 2>&1 | tail -1
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.48s
+```
+
+```
+$ ~/.cargo/bin/cargo fmt --check 2>&1; echo "EXIT:$?"
+EXIT:0
+```
+
+```
+$ ./target/release/fitsproof verify --budget-gb 4
+ADMITTED: 0.055 GB predicted peak <= 4.000 GB budget (margin: 3944.9 MB)
+allocator_peak: 0.000 GB
+VmHWM:          0.057 GB
+delta:          +0.1 MB (VmHWM - allocator_peak)
+budget:         4.000 GB
+budget_respected: true
+```
+
+```
+$ ./target/release/fitsproof admit \
+    --model ~/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
+    --quant q4_k_m --context 4096 --budget-gb 2.0; echo "EXIT:$?"
+REFUSED: needs 2.420 GB (weight=1.950 GB, kv=0.470 GB, activation=0.000 GB), budget 2.000 GB; no degradation fits
+EXIT:2
+```
+
+---
+
+
 
 ### Finding fixed
 

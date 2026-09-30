@@ -96,7 +96,7 @@ $ FITSPROOF_REAL_GGUF=~/.cache/qmd/models/hf_tobil_qmd-query-expansion-1.7B-q4_k
     cargo test --test real_model -- --nocapture
 Reading GGUF: ~/.cache/qmd/models/hf_tobil_qmd-query-expansion-1.7B-q4_k_m.gguf
   GGUF version: 3 | Tensor count: 311 | Architecture: qwen3
-  Predicted peak: 3.209 GB | Budget: 4.000 GB | Verdict: Fits
+  Predicted peak: 2.009 GB | Budget: 4.000 GB | Verdict: Fits
 test real_gguf_model_plan_succeeds ... ok
 ```
 
@@ -109,10 +109,10 @@ plus the delta — so the overhead of the runtime is a visible number, not a foo
 
 ```
 $ fitsproof verify --budget-gb 4
-ADMITTED: 0.057 GB predicted peak <= 4.000 GB budget (margin: 3943.3 MB)
+ADMITTED: 0.055 GB predicted peak <= 4.000 GB budget (margin: 3944.9 MB)
 allocator_peak: 0.000 GB
 VmHWM:          0.057 GB
-delta:          +0.5 MB (VmHWM - allocator_peak)
+delta:          +0.1 MB (VmHWM - allocator_peak)
 budget:         4.000 GB
 budget_respected: true
 ```
@@ -152,11 +152,11 @@ fitsproof admit --model "$MODEL" --quant q4_k_m --context $CTX --budget-gb $BUDG
 llama-cli -m "$MODEL" -c $CTX -n 200 -p "Explain GQA in one paragraph"
 ```
 
-If fitsproof refuses:
+If fitsproof refuses (e.g. tight budget on a 1.7B model):
 ```
-REFUSED: needs 3.664 GB (weight=3.194 GB, kv=0.470 GB, activation=0.000 GB), budget 3.000 GB; no degradation fits
+REFUSED: needs 2.420 GB (weight=1.950 GB, kv=0.470 GB, activation=0.000 GB), budget 2.000 GB; no degradation fits
 ```
-`kv=0.470 GB` is the bottleneck at 4096 context → fix: reduce `CTX=2048`.
+`kv=0.470 GB` contributes 0.5 GB at 4096 context → fix: reduce `CTX=2048`.
 
 Full recipe with failure modes: `docs/ADOPTION.md §2`.
 
@@ -241,7 +241,7 @@ tests/
   stress.rs          25-config stress harness (acceptance criteria)
   adversarial.rs     48 byzantine/edge-case tests (overflow, malformed input, boundary faults,
                      race condition close, FitsproofClient API attacks)
-  cmd_integration.rs 37 CLI integration tests (subcommand flags, error messages, exit codes)
+  cmd_integration.rs 44 CLI integration tests (subcommand flags, error messages, exit codes)
   contract_mutants.rs  33 mutation-killing tests targeting cost/plan/admit arithmetic
   real_model.rs      Real GGUF model test (plan against real weights)
   value/
