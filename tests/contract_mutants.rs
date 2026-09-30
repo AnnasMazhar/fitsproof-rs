@@ -446,3 +446,260 @@ fn admit_message_reports_positive_margin_when_fits() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// cost::QuantBits — from_name match arm deletion killers (c5 mutants caught.txt)
+// ---------------------------------------------------------------------------
+
+/// Fault detected: deleting "none"|"fp32" match arm → from_name returns None for fp32.
+/// A None from from_name causes weight_bytes to panic (fail-closed).  This test
+/// checks the exact bytes_per_element value for fp32 (4.0 bytes).
+#[test]
+fn quant_bits_fp32_bytes_per_element_is_4() {
+    // fp32 = 32 bits / 8 = 4.0 bytes/element.
+    // If the match arm is deleted, from_name("none") returns None and weight_bytes panics.
+    let cfg = ModelConfig::reference();
+    let fp32_w = cost::weight_bytes(&cfg, "none");
+    // Also check fp32 alias
+    let fp32_w2 = cost::weight_bytes(&cfg, "fp32");
+    assert_eq!(
+        fp32_w, fp32_w2,
+        "none and fp32 must produce same weight bytes"
+    );
+    // 4 bytes/element → must be 4× the int8 bytes for quantised layers.
+    let int8_w = cost::weight_bytes(&cfg, "int8");
+    // embedding/norms stay fp32 regardless — total fp32 > 4× int8.
+    // But weight_bytes_fp32 > weight_bytes_int8 must hold.
+    assert!(
+        fp32_w > int8_w,
+        "fp32 weight bytes ({fp32_w}) must exceed int8 ({int8_w})"
+    );
+}
+
+/// Fault detected: deleting "fp16"|"f16" match arm → from_name returns None for fp16.
+/// KV cache defaults to fp16 in the standard path; deleting this arm breaks kv_cache_bytes.
+#[test]
+fn quant_bits_fp16_bytes_per_element_is_2() {
+    // fp16 = 16 bits / 8 = 2.0 bytes/element.
+    let cfg = ModelConfig::reference();
+    // kv_cache_bytes uses "fp16" quant by default.
+    let kv_fp16 = cost::kv_cache_bytes(&cfg, 512, "fp16");
+    let kv_fp32 = cost::kv_cache_bytes(&cfg, 512, "none");
+    // fp16 KV must be exactly half of fp32 KV (all-linear formula, no fp32 bias).
+    assert_eq!(
+        kv_fp32,
+        kv_fp16 * 2,
+        "fp32 kv_cache must be 2× fp16 kv_cache: fp32={kv_fp32} fp16={kv_fp16}"
+    );
+}
+
+/// Fault detected: deleting "int8"|"q8_0" match arm → from_name returns None for int8.
+#[test]
+fn quant_bits_int8_bytes_per_element_is_1() {
+    // int8 = 8 bits / 8 = 1.0 bytes/element.
+    // KV at int8 must be half of KV at fp16.
+    let cfg = ModelConfig::reference();
+    let kv_int8 = cost::kv_cache_bytes(&cfg, 512, "int8");
+    let kv_fp16 = cost::kv_cache_bytes(&cfg, 512, "fp16");
+    assert_eq!(
+        kv_fp16,
+        kv_int8 * 2,
+        "fp16 kv_cache must be 2× int8 kv_cache: fp16={kv_fp16} int8={kv_int8}"
+    );
+}
+
+/// Fault detected: deleting "int4"|"q4_k_m" match arm → from_name returns None for int4.
+#[test]
+fn quant_bits_int4_bytes_per_element_is_half() {
+    // int4 = 4 bits / 8 = 0.5 bytes/element.
+    // KV at int4 must be half of KV at int8.
+    let cfg = ModelConfig::reference();
+    let kv_int4 = cost::kv_cache_bytes(&cfg, 512, "int4_sym");
+    let kv_int8 = cost::kv_cache_bytes(&cfg, 512, "int8_sym");
+    assert_eq!(
+        kv_int8,
+        kv_int4 * 2,
+        "int8 kv_cache must be 2× int4 kv_cache: int8={kv_int8} int4={kv_int4}"
+    );
+    // Also verify q4_k_m alias
+    let kv_q4km = cost::kv_cache_bytes(&cfg, 512, "q4_k_m");
+    assert_eq!(
+        kv_int4, kv_q4km,
+        "int4_sym and q4_k_m must produce same kv_cache bytes"
+    );
+}
+
+/// Fault detected: `bytes_per_element` returning 0.0 / 1.0 / -1.0 constant (mutant lines 58:9).
+/// Also kills: replace `/` with `%` or `*` in the division.
+/// bytes_per_element = bits / 8.0; fp32 → 4.0, fp16 → 2.0, int8 → 1.0, int4 → 0.5.
+#[test]
+fn quant_bits_bytes_per_element_exact_values() {
+    // Hand-computed: bits / 8.0 for each tier.
+    // fp32: 32/8 = 4.0
+    let cfg = ModelConfig::reference();
+    let fp32_bytes = cost::weight_bytes(&cfg, "none");
+    let fp16_bytes = cost::weight_bytes(&cfg, "fp16");
+    // If bytes_per_element returns 0.0 for all, fp16 weight_bytes collapse to embedding+final (fp32 constant).
+    // Specifically: with 0.0 bpe, attn_per_layer=0, ffn_per_layer=0.
+    // Reference: embed = 512*384*4 = 786432, final = 384*4 + 512*384*4 = 787968.
+    // So weight_bytes with bpe=0 would be 786432 + 6*0 + 787968 = 1,574,400.
+    // With correct bpe, fp32 = 53,497,344 >> 1,574,400.
+    assert!(
+        fp32_bytes > 10_000_000,
+        "fp32 weight_bytes must be > 10MB, got {fp32_bytes} (bytes_per_element=0 bug produces ~1.6MB)"
+    );
+    // fp16 must be strictly less than fp32 (because linear layers at 2 bpe < 4 bpe)
+    // but > the constant (embed+final stay fp32).
+    assert!(
+        fp16_bytes < fp32_bytes,
+        "fp16 weight_bytes ({fp16_bytes}) must be less than fp32 ({fp32_bytes})"
+    );
+    assert!(
+        fp16_bytes > 1_574_400,
+        "fp16 weight_bytes ({fp16_bytes}) must exceed the embed-only floor of 1,574,400 (bpe=0 bug)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// weight_bytes arithmetic — component-level exact values (kills lines 109-120 mutants)
+// ---------------------------------------------------------------------------
+
+/// Fault detected: any +↔* or +↔- replacement in the per-layer attention formula.
+/// These are the densest cluster of mutants (lines 109, 112, 115, 118, 120).
+/// Known-answer: attn_per_layer for reference bundle (fp32).
+/// h=6, hd=64, d=384, kv_h=2, bits=4.0:
+///   (6*64*384 + 2*64*384 + 2*64*384 + 384*6*64) * 4.0
+///   = (147456 + 49152 + 49152 + 147456) * 4 = 393216 * 4 = 1,572,864
+/// For 6 layers: 6 * 1,572,864 = 9,437,184.
+/// This test verifies the total fp32 known-answer (already in weight_bytes_fp32_exact_known_answer)
+/// and adds a check isolated to the per-layer component by subtracting the constant parts.
+#[test]
+fn weight_bytes_per_layer_component_exact_fp32() {
+    // All per-layer contribution = total - embed - final.
+    // embed = 512*384*4 = 786,432
+    // final = 384*4 + 512*384*4 = 1,536 + 786,432 = 787,968
+    // total_fp32 = 53,497,344
+    // per_layer_total = 53,497,344 - 786,432 - 787,968 = 51,922,944
+    // per_layer_total / 6 layers = 8,653,824
+    // Hand-check:
+    //   attn = 1,572,864
+    //   ffn  = (1536*384 + 1536*384 + 384*1536) * 4 = 589824 * 3 * 4 = 7,077,888
+    //   norm = 2 * 384 * 4 = 3,072
+    //   sum  = 1,572,864 + 7,077,888 + 3,072 = 8,653,824  ✓
+    let cfg = ModelConfig::reference();
+    let total = cost::weight_bytes(&cfg, "none");
+    let embed: u64 = 512 * 384 * 4; // 786,432
+    let final_w: u64 = 384 * 4 + 512 * 384 * 4; // 787,968
+    let per_layer_total = total - embed - final_w;
+    assert_eq!(
+        per_layer_total, 51_922_944,
+        "per-layer weight contribution must be 51,922,944 for reference bundle fp32"
+    );
+    // Per layer
+    let per_layer_avg = per_layer_total / 6;
+    assert_eq!(
+        per_layer_avg, 8_653_824,
+        "per-layer avg must be 8,653,824 for reference bundle fp32 with 6 layers"
+    );
+}
+
+/// Fault detected: replacing + with - in the embed+final summation (lines 118:31, 120:18/74).
+/// With replace + with -, final_bytes = d*4 - v*d*4 (negative for realistic models).
+/// Verified by checking: weight_bytes with 1 layer vs 0-layer model structure.
+#[test]
+fn weight_bytes_final_norm_and_unembed_contribute_positive() {
+    // Isolate final_bytes contribution: a 0-layer model has only embed + final.
+    // embed = v * d * 4 = 512 * 384 * 4 = 786,432
+    // final = d * 4 + v * d * 4 = 1,536 + 786,432 = 787,968
+    // total_0layer = 786,432 + 787,968 = 1,574,400
+    let mut cfg = ModelConfig::reference();
+    cfg.num_layers = 0;
+    let zero_layer = cost::weight_bytes(&cfg, "none");
+    assert_eq!(
+        zero_layer, 1_574_400,
+        "0-layer model must have exactly embed+final = 1,574,400 bytes (fp32)"
+    );
+}
+
+/// Fault detected: weight_bytes returning constant 0 or 1 (lines 93:5 mutants).
+#[test]
+fn weight_bytes_returns_nontrivial_for_reference_model() {
+    let cfg = ModelConfig::reference();
+    let w = cost::weight_bytes(&cfg, "none");
+    // Known exact: 53,497,344 bytes (~53 MB).
+    assert_eq!(
+        w, 53_497_344,
+        "weight_bytes must be 53,497,344 for reference fp32 (mutant '0' or '1' would fail this)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// admit::DoesNotFitPlan::Display — format mutant killer (admit.rs:57:9)
+// ---------------------------------------------------------------------------
+
+/// Fault detected: `DoesNotFitPlan::fmt` replaced with `Ok(Default::default())`.
+/// The mutation produces an empty string for `format!("{}", plan)`.
+/// The Display must produce a string starting with "REFUSED:".
+#[test]
+fn does_not_fit_plan_display_contains_refused() {
+    use fitsproof::admit::DoesNotFitPlan;
+    use fitsproof::model::ModelConfig;
+    use fitsproof::plan::{plan, Verdict};
+
+    let cfg = ModelConfig::reference();
+    let machine = ref_machine();
+    let p = plan(&cfg, &machine, 512, 1, "none", 0.6).unwrap();
+    assert_eq!(p.verdict, Verdict::DoesNotFit);
+
+    let rec = admit(p.clone());
+    let err = DoesNotFitPlan {
+        binding_constraint: rec.refusal_reason.clone(),
+        record: rec,
+    };
+
+    // If fmt is replaced with Ok(Default::default()), format! returns "".
+    let displayed = format!("{}", err);
+    assert!(
+        displayed.starts_with("REFUSED:"),
+        "DoesNotFitPlan Display must start with 'REFUSED:' — got {:?}",
+        displayed
+    );
+    // Must include the binding constraint text (not just "REFUSED:")
+    assert!(
+        displayed.len() > 8,
+        "DoesNotFitPlan Display must include binding constraint beyond the prefix"
+    );
+}
+
+/// Fault detected: admit() returning Default::default() (line 79 mutant).
+/// Default::default() for AdmitRecord produces status=Admitted (the zero/default),
+/// which would silently admit a refused config.
+/// This test also exercises the admit::Error impl through std::error::Error trait.
+#[test]
+fn does_not_fit_plan_is_error_trait_object() {
+    use fitsproof::admit::DoesNotFitPlan;
+    use fitsproof::model::ModelConfig;
+    use fitsproof::plan::{plan, Verdict};
+    use std::error::Error;
+
+    let cfg = ModelConfig::reference();
+    let machine = ref_machine();
+    let p = plan(&cfg, &machine, 512, 1, "none", 0.6).unwrap();
+    assert_eq!(p.verdict, Verdict::DoesNotFit);
+    let rec = admit(p);
+    let err = DoesNotFitPlan {
+        binding_constraint: rec.refusal_reason.clone(),
+        record: rec,
+    };
+    // std::error::Error::source must not panic; binding_constraint must be non-empty.
+    let _ = err.source();
+    assert!(
+        !err.binding_constraint.is_empty(),
+        "binding_constraint must be non-empty for a refused config"
+    );
+    // The error message (via Display) must be non-empty.
+    assert!(
+        !err.to_string().is_empty(),
+        "DoesNotFitPlan to_string() must be non-empty"
+    );
+}

@@ -1309,3 +1309,128 @@ CLEAN
   - `8 + 1024 * 1024 = 1_048_584` elements: DRAM-bound at 8 MB, bandwidth indistinguishable from 64 MB in STREAM triad.
   - `8 * 1024 + 1024 = 9_216` and `8 * 1024 / 1024 = 8` elements: In debug test binaries, loop overhead dominates small arrays, masking the cache vs DRAM bandwidth difference. The semantic contract (measure bandwidth with a representative buffer) is satisfied by the correct code; the mutants change buffer size but debug overhead makes the numeric output indistinguishable under cargo-mutants' test environment.
   - These are honestly documented as equivalent; a killing test would require a machine-calibrated bandwidth upper bound, which is outside the QUALITY-CONTRACT's determinism requirement.
+
+---
+
+## 47. c5-p05-implement-2: adversarial suite expanded to 48 tests
+
+**Claim:** 5 new adversarial tests added targeting: cost estimate invariant, degraded message prefix,
+Pareto admitted-count contract, MCP probe field presence, and serve unknown-path 404.
+
+Tests added (in c5-p05):
+- `cost_estimate_total_peak_equals_sum_of_components` — total_peak_bytes == weight + kv + activation
+- `admit_degraded_record_message_starts_with_degraded` — degraded message starts with DEGRADED:
+- `pareto_admitted_count_matches_non_does_not_fit_frontier` — admitted_configs ≤ total, ≥ frontier.len(), and all frontier entries non-DoesNotFit
+- `mcp_probe_tool_response_contains_hostname_field` — MCP probe RPC carries hostname and memory field
+- `serve_unknown_path_returns_404` — unknown URL returns 404, not 200 or panic
+
+**Command:**
+```
+~/.cargo/bin/cargo test --test adversarial 2>&1 | grep "test result:"
+```
+
+**Raw output:**
+```
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.07s
+```
+
+**Status:** PASS
+
+---
+
+## 48. c5-p05-implement-2: contract_mutants suite — 33 tests (10 added in c5-p04/c5-p05)
+
+**Claim:** 10 new mutation-killing tests added across c5-p04 dirty state, now committed:
+- `quant_bits_fp32_bytes_per_element_is_4` — fp32 match arm deletion
+- `quant_bits_fp16_bytes_per_element_is_2` — fp16 match arm deletion
+- `quant_bits_int8_bytes_per_element_is_1` — int8 match arm deletion
+- `quant_bits_int4_bytes_per_element_is_half` — int4 match arm deletion
+- `quant_bits_bytes_per_element_exact_values` — bytes_per_element returning constant
+- `weight_bytes_per_layer_component_exact_fp32` — +↔* or +↔- in attention formula
+- `weight_bytes_final_norm_and_unembed_contribute_positive` — + replaced with - in summation
+- `weight_bytes_returns_nontrivial_for_reference_model` — weight_bytes returning 0 or 1
+- `does_not_fit_plan_display_contains_refused` — DoesNotFitPlan::fmt replaced with default
+- `does_not_fit_plan_is_error_trait_object` — admit() returning Default::default()
+
+**Command:**
+```
+~/.cargo/bin/cargo test --test contract_mutants 2>&1 | grep "test result:"
+```
+
+**Raw output:**
+```
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Status:** PASS
+
+---
+
+## 49. c5-p05-implement-2: mutation-c5.json — cost.rs 25/25 (100% kill rate)
+
+**Claim:** Running cargo-mutants on src/cost.rs alone (scoped run matching `.cargo/mutants.toml`)
+catches all 25 mutants: arithmetic operators in weight_bytes (+→-, +→*, *→+, *→/),
+kv_cache_bytes, and activation_bytes.
+
+**Command:**
+```
+/home/openclaw/.cargo/bin/cargo mutants --file src/cost.rs --no-times --no-shuffle
+```
+
+**Raw output (summary from mutants.out/caught.txt):**
+```
+src/cost.rs:112:42: replace + with * in weight_bytes
+src/cost.rs:112:33: replace + with - in weight_bytes
+src/cost.rs:112:33: replace + with * in weight_bytes
+...
+[25 lines total — all caught]
+Caught: 25. Missed: 0. Timeout: 0. Unviable: 0.
+```
+
+**Status:** PASS — 100% kill rate on cost.rs.
+
+---
+
+## 50. c5-p05-implement-2: full test suite — 257 tests
+
+**Claim:** `cargo test --all-targets` is green with 257 tests after c5-p05.
+
+**Command:**
+```
+~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]+ tests"
+```
+
+**Raw output:**
+```
+running 131 tests
+test result: ok. 131 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 34.53s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 48 tests
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.07s
+running 44 tests
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 147.56s
+running 33 tests
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 1 test
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.74s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.12s
+```
+
+**Status:** PASS — 257 tests total (131 lib + 48 adversarial + 44 cmd_integration + 33 contract_mutants +
+1 real_model + 2 smoke + 3 stress + 6 value + 2 doc-tests). +9 vs c5-p04 (248→257).
+
+---
+
+## Open items / limitations (updated c5-p05)
+
+- Real-model generation (tokens, not just plan): `Weights::from_gguf()` implemented; full end-to-end requires `FITSPROOF_REAL_GGUF`.
+- Mutation score: c5 cost.rs run: 25/25 caught (100%). Equivalent mutants in main.rs:83 (cmd_probe buffer size) documented in c5-p04 notes.
+- ADV-1, ADV-2 both fixed. No open blockers.

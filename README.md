@@ -239,10 +239,10 @@ src/
 tests/
   smoke.rs           Binary smoke tests (version, unknown command)
   stress.rs          25-config stress harness (acceptance criteria)
-  adversarial.rs     38 byzantine/edge-case tests (overflow, malformed input, boundary faults,
+  adversarial.rs     48 byzantine/edge-case tests (overflow, malformed input, boundary faults,
                      race condition close, FitsproofClient API attacks)
   cmd_integration.rs 37 CLI integration tests (subcommand flags, error messages, exit codes)
-  contract_mutants.rs  23 mutation-killing tests targeting cost/plan/admit arithmetic
+  contract_mutants.rs  33 mutation-killing tests targeting cost/plan/admit arithmetic
   real_model.rs      Real GGUF model test (plan against real weights)
   value/
     test_incumbent_gap.rs  The two mandatory zero-case proofs (refused + degraded)

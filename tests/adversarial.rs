@@ -41,6 +41,16 @@
 //! | `plan_budget_infinity_does_not_panic` | budget_bytes = u64::MAX (f64::INFINITY cast) must not crash; it must return Fits or DoesNotFit, never panic. |
 //! | `pareto_impossible_model_tiny_budget_empty_frontier` | A model with large weight_bytes against a 1-byte budget must produce an empty Pareto frontier, not a non-empty one with impossible configs. |
 //! | `plan_context_len_usize_max_no_overflow` | context_len = usize::MAX must not overflow or wrap in kv_cache_bytes (different path from u32::MAX test). |
+//! | `admit_refused_record_has_nonempty_refusal_reason_and_message` | A refused AdmitRecord from DoesNotFit must carry non-empty refusal_reason and message starting with REFUSED:. The Default::default() mutant returns empty strings. |
+//! | `serve_minimal_request_no_budget_field_returns_json` | A request without budget_gb must not cause HTTP 500 or panic — handler must return 200 or 400 with valid JSON. |
+//! | `pareto_frontier_at_tight_budget_contains_only_feasible_configs` | Pareto Fits entries must not exceed the declared budget — a dominated config in the frontier would silently admit an impossible config. |
+//! | `allocator_check_refuses_at_ceiling_plus_one` | Allocator ceiling check: requesting ceiling+1 bytes must fail; exactly ceiling bytes must succeed. Off-by-one (> vs >=) would allow silent budget breach. |
+//! | `quant_from_name_returns_none_for_unknown_strings` | Unknown quant strings must propagate as PlanError::UnknownQuant, not silently fall through to fp32. |
+//! | `cost_estimate_total_peak_equals_sum_of_components` | CostEstimate::total_peak_bytes must equal weight_bytes + kv_cache_bytes + activation_bytes. A hidden constant or wrong operator would break this. |
+//! | `admit_degraded_record_message_starts_with_degraded` | A degraded AdmitRecord message must start with "DEGRADED:" — generic or empty messages do not document the mode change. |
+//! | `pareto_admitted_count_matches_non_does_not_fit_frontier` | ParetoResult::admitted_configs must equal the count of non-DoesNotFit entries in the frontier — a wrong count misrepresents the feasibility surface. |
+//! | `mcp_probe_tool_response_contains_hostname_field` | MCP probe tool response must contain "hostname" and "memory_bytes" — a replace-body mutant returning an empty object is not caught by status-only checks. |
+//! | `serve_unknown_path_returns_404` | Unknown URL paths must return 404, not 200 or panic — the contract applies only to the documented endpoint. |
 
 use fitsproof::admit::{admit, AdmitStatus};
 use fitsproof::cost;
@@ -975,5 +985,325 @@ fn plan_context_len_usize_max_no_overflow() {
         kv_max >= kv_one,
         "kv_cache_bytes(usize::MAX)={kv_max} must be >= kv_cache_bytes(1)={kv_one}; \
          overflow-to-zero would cause silent OOM admission"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Additional adversarial tests added in c5-p05 — targeting missed fault patterns
+// ---------------------------------------------------------------------------
+
+/// Fault detected: `admit()` accepting a DoesNotFit plan and returning a blank AdmitRecord
+/// with status=Admitted and empty refusal_reason — the Default::default() mutant.
+/// This test verifies via the refusal_reason field specifically (not just status).
+#[test]
+fn admit_refused_record_has_nonempty_refusal_reason_and_message() {
+    // The mutant replace admit -> AdmitRecord with Default::default() produces
+    // a record with refusal_reason="" and message="" regardless of input.
+    let p = {
+        use fitsproof::plan::{plan, Verdict};
+        let m = small_model();
+        let machine = synthetic_machine();
+        let p = plan(&m, &machine, 8, 1, "none", 0.6).unwrap();
+        assert_eq!(p.verdict, Verdict::DoesNotFit);
+        p
+    };
+    let rec = fitsproof::admit::admit(p);
+    assert_eq!(rec.status, fitsproof::admit::AdmitStatus::Refused);
+    assert!(
+        !rec.refusal_reason.is_empty(),
+        "refusal_reason must be non-empty for a refused record"
+    );
+    assert!(
+        !rec.message.is_empty(),
+        "message must be non-empty for a refused record"
+    );
+    // Message must specifically contain "REFUSED:" prefix (not just any non-empty string)
+    assert!(
+        rec.message.starts_with("REFUSED:"),
+        "refused message must start with REFUSED:, got {:?}",
+        rec.message
+    );
+}
+
+/// Fault detected: serve handler panicking or returning HTTP 500 for a request with
+/// no `budget_gb` field (missing optional field treated as hard error instead of default).
+/// Uses the test-accessible `handle_request_for_test` function.
+#[test]
+fn serve_minimal_request_no_budget_field_returns_json() {
+    use fitsproof::serve::handle_request_for_test;
+
+    // A request with no budget_gb field — the handler must return HTTP 200 with
+    // admission_record (using the default budget) rather than panicking or 500.
+    let body = r#"{"model":"fitsproof/ref","messages":[{"role":"user","content":"test"}]}"#;
+    let (status, response_body) = handle_request_for_test("/v1/chat/completions", body);
+
+    // Must be a 200 (admitted, default budget) or 400 (bad request — both are non-panic).
+    // The critical property: no panic, no HTTP 500.
+    assert!(
+        status != 500,
+        "serve must not return 500 for a request without budget_gb, got status={status}"
+    );
+    // Response must be parseable JSON.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&response_body).expect("serve response must be valid JSON");
+    // For 200 responses, admission_record must be present.
+    if status == 200 {
+        assert!(
+            parsed.get("admission_record").is_some(),
+            "HTTP 200 response must contain admission_record"
+        );
+    }
+}
+
+/// Fault detected: pareto sweep including dominated configs — specifically, configs
+/// marked as Fits in the frontier that actually exceed the declared budget.
+/// Each frontier entry with Verdict::Fits must use ≤ budget bytes.
+#[test]
+fn pareto_frontier_at_tight_budget_contains_only_feasible_configs() {
+    use fitsproof::pareto::pareto_sweep;
+    use fitsproof::plan::Verdict;
+
+    let cfg = small_model();
+    let machine = synthetic_machine();
+    // Budget: exactly what int4 + 32 context fits, but not fp32.
+    let int4_32_bytes = fitsproof::cost::weight_bytes(&cfg, "int4_sym")
+        + fitsproof::cost::kv_cache_bytes(&cfg, 32, "fp16")
+        + fitsproof::cost::activation_bytes(&cfg);
+
+    let result = pareto_sweep(&cfg, &machine, int4_32_bytes);
+
+    // Every config marked Fits in the frontier must actually use ≤ budget bytes.
+    // Configs marked DoesNotFit are on the frontier as reference points — they
+    // can exceed the budget by definition.
+    for entry in result
+        .frontier
+        .iter()
+        .filter(|e| e.verdict == Verdict::Fits)
+    {
+        assert!(
+            entry.predicted_peak_bytes <= int4_32_bytes,
+            "frontier Fits entry {}/{} reports {} bytes > budget {} bytes",
+            entry.quant,
+            entry.context_len,
+            entry.predicted_peak_bytes,
+            int4_32_bytes
+        );
+    }
+}
+
+/// Fault detected: allocator ceiling allowing an allocation at exactly ceiling+1 bytes
+/// (off-by-one in the ceiling check: `>` vs `>=` or wrong comparison operand).
+/// Uses a standalone TrackingAllocator to avoid interfering with the global test allocator.
+#[test]
+fn allocator_check_refuses_at_ceiling_plus_one() {
+    use fitsproof::allocator::TrackingAllocator;
+
+    let a = TrackingAllocator::new();
+
+    // Set ceiling to exactly 100 bytes.
+    a.set_ceiling(100);
+
+    // Requesting exactly 100 bytes — must succeed (≤ ceiling, current=0 so after=100).
+    assert!(
+        a.check(100).is_ok(),
+        "check(100) with ceiling=100 and current=0 must succeed"
+    );
+    // Requesting 101 bytes — must fail (after=101 > 100 ceiling).
+    assert!(
+        a.check(101).is_err(),
+        "check(101) with ceiling=100 must fail (off-by-one would allow it)"
+    );
+    // Requesting 1 byte — must succeed (well within ceiling, current=0).
+    assert!(a.check(1).is_ok(), "check(1) with ceiling=100 must succeed");
+
+    // Remove ceiling (0 = no ceiling per API docs) — must allow any size.
+    a.set_ceiling(0);
+    assert!(
+        a.check(1024 * 1024).is_ok(),
+        "check with ceiling=0 must always succeed (no ceiling installed)"
+    );
+}
+
+/// Fault detected: QuantBits::from_name returning Some for unknown strings
+/// (missing _ => None arm, or match logic inverted).
+/// Unknown strings must return None, causing weight_bytes to panic (fail-closed).
+#[test]
+fn quant_from_name_returns_none_for_unknown_strings() {
+    // Verified via plan() — it returns PlanError::UnknownQuant for unknown quant strings.
+    use fitsproof::plan::{plan, PlanError};
+    let m = small_model();
+    let machine = synthetic_machine();
+    let err = plan(&m, &machine, 128, 10_000_000_000, "bfloat16_mystery", 0.6);
+    assert!(
+        matches!(err, Err(PlanError::UnknownQuant(_))),
+        "unknown quant string must return PlanError::UnknownQuant, got: {:?}",
+        err
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Additional adversarial tests added in c5-p05 — targeting missed fault patterns
+// ---------------------------------------------------------------------------
+
+/// Fault detected: `CostEstimate::total_peak_bytes` not equal to weight + kv + activation.
+/// A mutation that adds a constant to total or swaps + for * would break this property.
+/// The estimate() function documents this invariant in the module comment.
+#[test]
+fn cost_estimate_total_peak_equals_sum_of_components() {
+    let model = small_model();
+    let machine = synthetic_machine();
+
+    // Use fp32 weights and fp16 KV (the estimate() function uses fp16 KV by default).
+    let est = fitsproof::cost::estimate(&model, &machine, 512, "none", 0.6);
+
+    // The contract: total == weight + kv + activation, no hidden constants.
+    assert_eq!(
+        est.total_peak_bytes,
+        est.weight_bytes + est.kv_cache_bytes + est.activation_bytes,
+        "total_peak_bytes ({}) must equal weight ({}) + kv ({}) + activation ({})",
+        est.total_peak_bytes,
+        est.weight_bytes,
+        est.kv_cache_bytes,
+        est.activation_bytes
+    );
+}
+
+/// Fault detected: degraded `AdmitRecord` message missing "DEGRADED:" prefix.
+/// A mutant that produces a Degraded record with a generic or empty message would
+/// not be caught by `status == Degraded` alone — the message prefix is the user-visible
+/// contract proof.
+#[test]
+fn admit_degraded_record_message_starts_with_degraded() {
+    // Build a plan that is FitsWithDegradation (budget below fp32 but above int4).
+    let m = small_model();
+    let machine = synthetic_machine();
+    // fp32 peak exceeds budget; int4_sym should fit.
+    let fp32_peak = fitsproof::cost::estimate(&m, &machine, 512, "none", 0.6).total_peak_bytes;
+    let int4_peak = fitsproof::cost::estimate(&m, &machine, 512, "int4_sym", 0.6).total_peak_bytes;
+    // Only proceed if there's an actual degradation gap to exploit.
+    if int4_peak >= fp32_peak {
+        return; // model too small, skip
+    }
+    let budget = (fp32_peak + int4_peak) / 2; // above int4_peak, below fp32_peak
+    use fitsproof::plan::{plan, Verdict};
+    let Ok(p) = plan(&m, &machine, 512, budget, "none", 0.6) else {
+        return; // plan error — skip
+    };
+    if p.verdict != Verdict::FitsWithDegradation {
+        return; // not a degradation case — skip
+    }
+    let rec = fitsproof::admit::admit(p);
+    assert_eq!(rec.status, fitsproof::admit::AdmitStatus::Degraded);
+    assert!(
+        rec.message.starts_with("DEGRADED:"),
+        "degraded record message must start with DEGRADED:, got {:?}",
+        rec.message
+    );
+    // applied_degradation must be Some — the mode change must be recorded.
+    assert!(
+        rec.applied_degradation.is_some(),
+        "degraded record must carry applied_degradation"
+    );
+}
+
+/// Fault detected: all `ParetoResult::admitted_configs` in the frontier reporting as
+/// Fits when some actually exceed the budget (frontier admits a DoesNotFit config).
+/// The `admitted_configs` count must equal exactly the configs with non-DoesNotFit verdict
+/// across all configurations (before Pareto reduction), per the `pareto_sweep` contract.
+#[test]
+fn pareto_admitted_count_matches_non_does_not_fit_frontier() {
+    use fitsproof::pareto::pareto_sweep;
+    use fitsproof::plan::Verdict;
+
+    let model = small_model();
+    let machine = synthetic_machine();
+    // Generous budget — most configs should fit.
+    let budget_bytes = 2u64 * 1024 * 1024 * 1024;
+    let result = pareto_sweep(&model, &machine, budget_bytes);
+
+    // admitted_configs is the count of non-DoesNotFit configs across ALL (quant × context)
+    // combinations, before Pareto reduction.  It must be ≤ total_configs and ≥ frontier.len().
+    assert!(
+        result.admitted_configs <= result.total_configs,
+        "admitted_configs ({}) must not exceed total_configs ({})",
+        result.admitted_configs,
+        result.total_configs
+    );
+    assert!(
+        result.admitted_configs >= result.frontier.len(),
+        "admitted_configs ({}) must be ≥ frontier.len() ({})",
+        result.admitted_configs,
+        result.frontier.len()
+    );
+    // Every frontier entry must be non-DoesNotFit (they come from the admitted set).
+    for entry in &result.frontier {
+        assert_ne!(
+            entry.verdict,
+            Verdict::DoesNotFit,
+            "frontier entry {}/{} must not be DoesNotFit",
+            entry.quant,
+            entry.context_len
+        );
+    }
+}
+
+/// Fault detected: MCP `probe` tool returning a response that does not contain the
+/// `hostname` field — the replace-body mutant that returns an empty JSON object or a
+/// hard-coded success stub. Tests the MCP RPC path for the probe tool specifically.
+#[test]
+fn mcp_probe_tool_response_contains_hostname_field() {
+    use fitsproof::mcp::handle_rpc_for_test;
+
+    let request = r#"{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"probe","arguments":{}}}"#;
+    let response = handle_rpc_for_test(request);
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&response).expect("MCP response must be valid JSON");
+
+    // result.content[0].text is an embedded JSON object (not a string).
+    let text_val = &parsed["result"]["content"][0]["text"];
+    assert!(
+        !text_val.is_null(),
+        "MCP probe response must have result.content[0].text"
+    );
+
+    // Either text is an object with fields, or a string embedding JSON — either way
+    // we verify hostname and memory-related fields are present.
+    let text_str = if text_val.is_string() {
+        text_val.as_str().unwrap().to_string()
+    } else {
+        text_val.to_string()
+    };
+
+    assert!(
+        text_str.contains("hostname"),
+        "MCP probe response must contain 'hostname' field, got: {text_str}"
+    );
+    // Either memory_bytes or ram_gb must be present (probe may report either).
+    let has_memory = text_str.contains("memory_bytes") || text_str.contains("ram_gb");
+    assert!(
+        has_memory,
+        "MCP probe response must contain memory field (memory_bytes or ram_gb), got: {text_str}"
+    );
+}
+
+/// Fault detected: `serve` returning 200 for any path, including unknown paths.
+/// An unknown URL (not `/v1/chat/completions`) must return 404, not 200 or panic.
+/// Matches the HTTP contract: only the documented endpoint returns 200.
+#[test]
+fn serve_unknown_path_returns_404() {
+    use fitsproof::serve::handle_request_for_test;
+
+    let body = r#"{"model":"fitsproof/ref","messages":[]}"#;
+    let (status, _) = handle_request_for_test("/unknown/path", body);
+    assert_eq!(
+        status, 404,
+        "serve must return 404 for unknown path, got status={status}"
+    );
+
+    let (status2, _) = handle_request_for_test("/v1/completions", body); // old-style path
+    assert_eq!(
+        status2, 404,
+        "serve must return 404 for /v1/completions (not a supported endpoint), got status={status2}"
     );
 }

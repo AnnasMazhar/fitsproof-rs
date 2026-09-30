@@ -1,0 +1,16 @@
+{
+  "cycle": 5,
+  "tool": "cargo-mutants",
+  "command": "/home/openclaw/.cargo/bin/cargo mutants --file src/cost.rs --no-times --no-shuffle",
+  "target_module": "src/cost.rs",
+  "total_mutants": 25,
+  "caught": 25,
+  "missed": 0,
+  "timeout": 0,
+  "unviable": 0,
+  "kill_rate": 1.0,
+  "score_raw": "25/25",
+  "target": 0.7,
+  "generated_at": 1727692800.0,
+  "notes": "Full cost.rs mutation run: all 25 mutants caught (100%). Mutants covered weight_bytes arithmetic (+/-/*), kv_cache_bytes arithmetic, activation_bytes arithmetic. The contract_mutants test suite (33 tests) plus the lib tests killed all mutants. Equivalent-mutant note for cmd_probe buffer (main.rs:83) from c5-p04 stands."
+}
