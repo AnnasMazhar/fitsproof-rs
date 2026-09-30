@@ -704,3 +704,272 @@ fn does_not_fit_plan_is_error_trait_object() {
         "DoesNotFitPlan to_string() must be non-empty"
     );
 }
+
+// ---------------------------------------------------------------------------
+// plan.rs mutation-killing tests (c6-p04-implement-1)
+// ---------------------------------------------------------------------------
+
+/// Fault detected: `predicted_peak <= budget_bytes` replaced with `predicted_peak < budget_bytes`
+/// (off-by-one: exact-fit should be Fits, not FitsWithDegradation).
+/// Also kills: `predicted_peak > budget_bytes` replacing `predicted_peak <= budget_bytes`.
+#[test]
+fn plan_exact_peak_equals_budget_is_fits_not_degraded() {
+    let cfg = ModelConfig::reference();
+    let machine = ref_machine();
+    // Get the exact predicted peak bytes by planning with a huge budget.
+    let p_huge = plan(&cfg, &machine, 512, u64::MAX / 2, "none", 0.6).unwrap();
+    let exact_peak = p_huge.predicted_peak_bytes;
+    // Now plan with budget == exact peak: must be Fits (not FitsWithDegradation or DoesNotFit).
+    let p = plan(&cfg, &machine, 512, exact_peak, "none", 0.6).unwrap();
+    assert_eq!(
+        p.verdict,
+        Verdict::Fits,
+        "plan with budget == predicted peak must be Fits; \
+         `<=` mutated to `<` would produce FitsWithDegradation"
+    );
+}
+
+/// Fault detected: `predicted_peak <= budget_bytes` replaced with `predicted_peak <= 0`
+/// or the budget comparison is dropped entirely.
+/// We test that reducing the budget by exactly 1 byte below peak flips to not-fits.
+#[test]
+fn plan_one_byte_below_peak_is_not_fits() {
+    let cfg = ModelConfig::reference();
+    let machine = ref_machine();
+    let p_huge = plan(&cfg, &machine, 512, u64::MAX / 2, "none", 0.6).unwrap();
+    let exact_peak = p_huge.predicted_peak_bytes;
+    // budget = peak - 1: must NOT be Fits.
+    let p = plan(&cfg, &machine, 512, exact_peak - 1, "none", 0.6).unwrap();
+    assert_ne!(
+        p.verdict,
+        Verdict::Fits,
+        "plan with budget = peak - 1 must not be Fits; \
+         a constant-true budget check would give Fits"
+    );
+}
+
+/// Fault detected: CI computation `predicted_peak * 0.8` replaced with `predicted_peak * 1.0`
+/// (lower = upper = peak → zero-width interval) or `predicted_peak * 1.2` (inverted interval).
+/// The CI lower bound must be strictly less than the upper bound.
+#[test]
+fn plan_ci_lower_strictly_less_than_upper() {
+    let cfg = ModelConfig::reference();
+    let machine = ref_machine();
+    let p = plan(&cfg, &machine, 512, 1_000_000_000, "none", 0.6).unwrap();
+    assert!(
+        p.predicted_peak_ci.0 < p.predicted_peak_ci.1,
+        "CI lower ({}) must be < CI upper ({}); \
+         0.8 mutated to 1.2 would invert the interval",
+        p.predicted_peak_ci.0,
+        p.predicted_peak_ci.1
+    );
+}
+
+/// Fault detected: CI lower bound `peak * 0.8` replaced with `peak * 0.0` (always zero)
+/// or `peak * 1.0` (lower = peak, no uncertainty).
+/// We assert that CI lower is strictly positive AND < peak.
+#[test]
+fn plan_ci_lower_is_below_predicted_peak() {
+    let cfg = ModelConfig::reference();
+    let machine = ref_machine();
+    let p = plan(&cfg, &machine, 512, 1_000_000_000, "none", 0.6).unwrap();
+    assert!(
+        p.predicted_peak_ci.0 > 0,
+        "CI lower must be > 0 (fault: lower = 0 from 0.8 → 0.0 mutant)"
+    );
+    assert!(
+        p.predicted_peak_ci.0 < p.predicted_peak_bytes,
+        "CI lower ({}) must be < predicted_peak ({}); \
+         0.8 mutated to 1.0 would make lower = peak",
+        p.predicted_peak_ci.0,
+        p.predicted_peak_bytes
+    );
+}
+
+/// Fault detected: CI upper bound `peak * 1.2` replaced with `peak * 1.0` (upper = peak)
+/// or `peak * 0.8` (upper < peak — inverted).
+/// We assert CI upper is strictly greater than predicted peak.
+#[test]
+fn plan_ci_upper_is_above_predicted_peak() {
+    let cfg = ModelConfig::reference();
+    let machine = ref_machine();
+    let p = plan(&cfg, &machine, 512, 1_000_000_000, "none", 0.6).unwrap();
+    assert!(
+        p.predicted_peak_ci.1 > p.predicted_peak_bytes,
+        "CI upper ({}) must be > predicted_peak ({}); \
+         1.2 mutated to 1.0 would make upper = peak",
+        p.predicted_peak_ci.1,
+        p.predicted_peak_bytes
+    );
+}
+
+/// Fault detected: degradation search `current_idx + 1` replaced with `current_idx`
+/// (includes current quant in degradation list) or `QUANT_ORDER.len()` (skips all).
+/// Also: `fitting.is_some()` replaced with `fitting.is_none()`.
+/// We assert that FitsWithDegradation has at least one fitting degradation step.
+#[test]
+fn plan_fits_with_degradation_has_fitting_step_not_empty() {
+    // fp32 with very tight budget: must require degradation (int8 or int4 should fit).
+    let cfg = ModelConfig::reference();
+    let machine = ref_machine();
+    // Budget: just below fp32 peak but well above int4 peak.
+    let fp32_peak = fitsproof::cost::weight_bytes(&cfg, "none")
+        + fitsproof::cost::kv_cache_bytes(&cfg, 512, "fp16")
+        + fitsproof::cost::activation_bytes(&cfg);
+    let p = plan(&cfg, &machine, 512, fp32_peak - 1, "none", 0.6).unwrap();
+    assert_eq!(
+        p.verdict,
+        Verdict::FitsWithDegradation,
+        "plan just below fp32 peak must be FitsWithDegradation"
+    );
+    let fitting_count = p.degradations.iter().filter(|d| d.fits_budget).count();
+    assert!(
+        fitting_count > 0,
+        "FitsWithDegradation must have at least one fitting degradation step; \
+         fitting.is_some() → is_none() mutant would report 0 fitting steps"
+    );
+}
+
+/// Fault detected: binding_constraint is empty when DoesNotFit
+/// (DoesNotFit branch omits the binding_constraint field assignment).
+/// We also verify the exact format contains GB component breakdown.
+#[test]
+fn plan_does_not_fit_binding_constraint_has_gb_breakdown() {
+    let cfg = ModelConfig::reference();
+    let machine = ref_machine();
+    // Budget 1 byte: no degradation can fit.
+    let p = plan(&cfg, &machine, 512, 1, "none", 0.6).unwrap();
+    assert_eq!(p.verdict, Verdict::DoesNotFit);
+    assert!(
+        p.binding_constraint.contains("GB"),
+        "binding_constraint must contain GB breakdown; got: {:?}",
+        p.binding_constraint
+    );
+    assert!(
+        p.binding_constraint.contains("weight="),
+        "binding_constraint must name weight component; got: {:?}",
+        p.binding_constraint
+    );
+}
+
+// ---------------------------------------------------------------------------
+// admit.rs deeper mutation-killing tests (c6-p04-implement-1)
+// ---------------------------------------------------------------------------
+
+/// Fault detected: `plan.budget_bytes as f64 - plan.predicted_peak_bytes as f64`
+/// (margin computation) replaced with `+` or `0.0`.
+/// Margin must be positive (budget > peak for Fits) and must match the formula.
+#[test]
+fn admit_fits_margin_is_correct_arithmetic() {
+    let cfg = ModelConfig::reference();
+    let machine = ref_machine();
+    let budget_bytes = 1_000_000_000u64;
+    let p = plan(&cfg, &machine, 512, budget_bytes, "none", 0.6).unwrap();
+    assert_eq!(p.verdict, Verdict::Fits);
+    let predicted = p.predicted_peak_bytes;
+    let rec = admit(p);
+    assert_eq!(rec.status, AdmitStatus::Admitted);
+    // Margin in MB must be (budget - predicted) / 1e6.
+    let expected_margin_mb = (budget_bytes as f64 - predicted as f64) / 1e6;
+    let margin_str = format!("{:.1} MB", expected_margin_mb);
+    assert!(
+        rec.message.contains(&margin_str),
+        "message must contain margin '{margin_str}'; got: {:?}",
+        rec.message
+    );
+}
+
+/// Fault detected: `AdmitStatus::Degraded` branch emits `AdmitStatus::Admitted` instead.
+/// If the Degraded branch assigns Admitted, applied_degradation would still be Some,
+/// but status would be Admitted — a silent mode change.
+#[test]
+fn admit_degraded_status_is_degraded_not_admitted() {
+    let cfg = ModelConfig::reference();
+    let machine = ref_machine();
+    let fp32_peak = fitsproof::cost::weight_bytes(&cfg, "none")
+        + fitsproof::cost::kv_cache_bytes(&cfg, 512, "fp16")
+        + fitsproof::cost::activation_bytes(&cfg);
+    let p = plan(&cfg, &machine, 512, fp32_peak - 1, "none", 0.6).unwrap();
+    assert_eq!(p.verdict, Verdict::FitsWithDegradation);
+    let rec = admit(p);
+    assert_eq!(
+        rec.status,
+        AdmitStatus::Degraded,
+        "status must be Degraded, not Admitted; Degraded → Admitted mutant is a silent mode change"
+    );
+    assert!(
+        rec.applied_degradation.is_some(),
+        "applied_degradation must be Some for Degraded status"
+    );
+}
+
+/// Fault detected: `AdmitStatus::Refused` in the DoesNotFit branch replaced with
+/// `AdmitStatus::Admitted` or `AdmitStatus::Degraded`.
+/// We assert status == Refused AND applied_degradation.is_none() for a DoesNotFit plan.
+#[test]
+fn admit_refused_status_is_refused_not_degraded_or_admitted() {
+    let cfg = ModelConfig::reference();
+    let machine = ref_machine();
+    let p = plan(&cfg, &machine, 512, 1, "none", 0.6).unwrap();
+    assert_eq!(p.verdict, Verdict::DoesNotFit);
+    let rec = admit(p);
+    assert_eq!(
+        rec.status,
+        AdmitStatus::Refused,
+        "status must be Refused for DoesNotFit; mutation to Admitted or Degraded would \
+         be a silent contract violation"
+    );
+    assert!(
+        rec.applied_degradation.is_none(),
+        "applied_degradation must be None for Refused status"
+    );
+}
+
+/// Fault detected: DEGRADED message `"DEGRADED: base config needs"` replaced with `"ADMITTED"`.
+/// If the Degraded branch formats the message starting with ADMITTED, callers cannot
+/// distinguish admitted from degraded by message prefix.
+#[test]
+fn admit_degraded_message_prefix_is_degraded_not_admitted() {
+    let cfg = ModelConfig::reference();
+    let machine = ref_machine();
+    let fp32_peak = fitsproof::cost::weight_bytes(&cfg, "none")
+        + fitsproof::cost::kv_cache_bytes(&cfg, 512, "fp16")
+        + fitsproof::cost::activation_bytes(&cfg);
+    let p = plan(&cfg, &machine, 512, fp32_peak - 1, "none", 0.6).unwrap();
+    let rec = admit(p);
+    assert!(
+        rec.message.starts_with("DEGRADED:"),
+        "Degraded message must start with 'DEGRADED:', got: {:?}",
+        rec.message
+    );
+    assert!(
+        !rec.message.starts_with("ADMITTED"),
+        "Degraded message must NOT start with 'ADMITTED'; got: {:?}",
+        rec.message
+    );
+}
+
+/// Fault detected: ADMITTED margin formula `budget - predicted` replaced with `predicted - budget`
+/// (negative margin) or the margin is omitted entirely.
+/// Margin reported in MB must be positive and numerically correct.
+#[test]
+fn admit_admitted_message_margin_is_positive() {
+    let cfg = ModelConfig::reference();
+    let machine = ref_machine();
+    let p = plan(&cfg, &machine, 512, 1_000_000_000, "none", 0.6).unwrap();
+    assert_eq!(p.verdict, Verdict::Fits);
+    let rec = admit(p);
+    // Parse the margin from the message: "margin: NNN.N MB"
+    let margin_str = rec
+        .message
+        .split("margin: ")
+        .nth(1)
+        .and_then(|s| s.split(" MB").next())
+        .unwrap_or("missing");
+    let margin: f64 = margin_str.parse().unwrap_or(f64::NAN);
+    assert!(
+        margin > 0.0,
+        "margin must be positive (budget > peak for Fits); \
+         `budget - predicted` mutated to `predicted - budget` gives negative; got '{margin_str}'"
+    );
+}

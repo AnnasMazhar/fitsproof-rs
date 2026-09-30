@@ -1461,3 +1461,105 @@ test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; fini
 - Real-model generation (tokens, not just plan): `Weights::from_gguf()` implemented; full end-to-end requires `FITSPROOF_REAL_GGUF`.
 - Mutation score: c5 cost.rs run: 25/25 caught (100%). Equivalent mutants in main.rs:83 (cmd_probe buffer size) documented in c5-p04 notes.
 - ADV-1, ADV-2 both fixed. No open blockers.
+
+---
+
+## 51. c6-p04-implement-1: mutation-killing tests — 22 new tests targeting main.rs and plan.rs/admit.rs
+
+**Context:** c5 mutation run (cargo-mutants on main.rs) found 23 missed mutants. Separate c5 run
+on cost.rs was 100% kill rate. plan.rs and admit.rs had no dedicated mutation run yet.
+
+**New tests added:**
+
+### cmd_integration.rs — 10 new tests
+
+**parse_budget_gb mutation killers (5 tests):**
+- `parse_budget_gb_present_flag_is_used` — kills Ok(None) / Ok(Some(0.0)) replacements
+- `parse_budget_gb_returns_correct_value_not_zero_or_negative` — kills Ok(Some(0.0)) / Ok(Some(-1.0))
+- `parse_budget_gb_tiny_budget_refused_not_admitted` — kills Ok(Some(1.0)) replacement
+- `parse_budget_gb_zero_rejected_by_guard` — kills `v > 0.0 && v.is_finite() → true`
+- `parse_budget_gb_eq_flag_match_is_correct_polarity` — kills `== "--budget-gb"` → `!= "--budget-gb"`
+
+**cmd_stress mutation killers (5 tests):**
+- `stress_fp32_peak_addition_not_multiplication` — kills `+` → `*` in fp32_peak computation
+- `stress_violations_count_exact_zero_with_exit_0` — kills `violations += 1` → `-=` / `*=`
+- `stress_refused_configs_do_not_count_as_violations` — kills `== Refused` → `!= Refused`
+- `stress_degraded_eff_budget_is_4x_peak_not_additive` — kills `* 4` → `+ 4` / `/ 4`
+- `stress_exit_requires_both_conditions_met` — kills `&&` → `||` in exit condition
+
+### contract_mutants.rs — 12 new tests
+
+**plan.rs CI bound mutation killers (4 tests):**
+- `plan_ci_lower_strictly_less_than_upper` — kills `0.8 → 1.2` (inverted interval)
+- `plan_ci_lower_is_below_predicted_peak` — kills `0.8 → 0.0` and `0.8 → 1.0`
+- `plan_ci_upper_is_above_predicted_peak` — kills `1.2 → 1.0`
+- `plan_exact_peak_equals_budget_is_fits_not_degraded` — kills `<=` → `<` in fits check
+- `plan_one_byte_below_peak_is_not_fits` — kills constant-true budget check
+
+**plan.rs degradation search killer (1 test):**
+- `plan_fits_with_degradation_has_fitting_step_not_empty` — kills `fitting.is_some() → is_none()`
+
+**plan.rs binding constraint format killer (1 test):**
+- `plan_does_not_fit_binding_constraint_has_gb_breakdown` — kills empty binding_constraint in DoesNotFit
+
+**admit.rs mutation killers (6 tests):**
+- `admit_fits_margin_is_correct_arithmetic` — kills `budget - predicted` → `predicted - budget`
+- `admit_degraded_status_is_degraded_not_admitted` — kills Degraded → Admitted silent mode change
+- `admit_refused_status_is_refused_not_degraded_or_admitted` — kills Refused → Admitted/Degraded
+- `admit_degraded_message_prefix_is_degraded_not_admitted` — kills "DEGRADED:" → "ADMITTED"
+- `admit_admitted_message_margin_is_positive` — kills negative margin formula
+
+**Command:**
+```
+~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]+ tests"
+```
+
+**Raw output:**
+```
+running 132 tests
+test result: ok. 132 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.10s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 50 tests
+test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 36.25s
+running 54 tests
+test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 184.19s
+running 45 tests
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.43s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Status:** PASS — 293 tests total (132 lib + 50 adversarial + 54 cmd_integration + 45 contract_mutants +
+1 real_model + 2 smoke + 3 stress + 6 value). +22 vs c5-p05 (271→293).
+
+---
+
+## 52. c6-p04-implement-1: clippy + fmt clean
+
+**Command:**
+```
+~/.cargo/bin/cargo clippy --all-targets -- -D warnings && ~/.cargo/bin/cargo fmt --check && echo "CLEAN"
+```
+
+**Raw output:**
+```
+    Checking fitsproof-rs v0.1.0 (...)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s
+CLEAN
+```
+
+**Status:** PASS
+
+---
+
+## Open items / limitations (updated c6-p04)
+
+- Real-model generation (tokens, not just plan): `Weights::from_gguf()` implemented; full end-to-end requires `FITSPROOF_REAL_GGUF`.
+- Mutation score: c5 cost.rs run: 25/25 caught (100%). c5 main.rs timed out; 23 missed mutants now have killing tests. plan.rs and admit.rs mutation run pending (c6 mutation pass).
+- ADV-1, ADV-2 both fixed. No open blockers.
