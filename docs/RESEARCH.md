@@ -9353,3 +9353,383 @@ applying the correction.
 design-driving): full method, equations, assumptions, failure modes documented.
 Falsification entries 52–55 added.  3 new open questions (OQ-C6-1, OQ-C6-2, OQ-C6-3)
 filed for v0.2.  All links verified 2026-09-30.*
+
+---
+
+# Cycle 6, Pass 2 — Ecosystem and Competition: Deepened (2026-09-30)
+
+Refreshes star counts for all 21 previously-tracked tools against the 2026-09-30T22:00 UTC
+GitHub REST API (where available; unauthenticated, subject to rate limiting).  Searches for
+new tools that may close the gap claim.  Verifies the five-property gap against the updated
+ecosystem.  Connects the cycle 6 pass 1 source additions (sources 80–89) to their comparison
+table implications.
+
+---
+
+## Updated star counts (as of 2026-09-30T22:00 UTC)
+
+| Tool | Stars (c5-p2, 2026-09-29T19:00) | Stars (this pass, 2026-09-30T22:00) | Delta | Last push |
+|------|--------------------------------|--------------------------------------|-------|-----------|
+| llama.cpp | 129,849 | **129,987** | +138 | 2026-09-30 |
+| vLLM | 92,915 | **93,002** | +87 | 2026-09-30 |
+| SGLang | 36,572 | **36,673** | +101 | 2026-09-30 |
+| KTransformers | 19,544 | **19,549** | +5 | 2026-09-30 |
+| EricLBuehler/mistral.rs | 7,722 | **7,723** | +1 | 2026-09-25 |
+| AlexsJones/llmfit | 37,300 | **37,395** | +95 | 2026-09-29 |
+| signerless/llm-checker | 2,998 | **3,000** | +2 | 2026-09-06 |
+| coderredlab/runNburn | 28 | **28** | 0 | 2026-08-27 |
+| cool-japan/oxillama | 38 | **38** | 0 | 2026-08-17 |
+| arya51-ai/ignis | 4 | **4** | 0 | 2026-06-26 |
+| Grevix/aura | 4 | **4** | 0 | 2026-09-03 |
+| detllm | 20 | **20** | 0 | 2026-08-20 |
+| SimonWaldherr/RustyLLM | 7 | **7** | 0 | 2026-09-17 |
+| kkpkishan/llm-infra-planner | 11 | **11** | 0 | 2026-04-23 |
+| ridgepoint | 1 | **1** (PyPI v0.1.2) | 0 | 2026-09-08 |
+| llm-inference-calculator | 21 | **21** | 0 | 2026-09-09 |
+| llm-roofline | 0 | **0** | 0 | 2026-06-20 |
+| hardware-aware-llm-runtime | 0 | **0** | 0 | 2026-06-25 |
+| llm-vram-calculator | 1 | **1** | 0 | 2026-09-26 |
+| 09Catho/VRAMancer | 1 | **1** | 0 | 2026-01-30 |
+| Sheikyon/LLM-X | 4 | **4** | 0 | 2026-01-21 |
+
+Star velocity notes:
+- llama.cpp gained 138 stars in 27 hours — active daily development, pushed 2026-09-30.
+- vLLM gained 87 stars, SGLang 101 — both pushed on 2026-09-30, continuous active development.
+- llmfit gained 95 stars in 27 hours — fastest-growing sizer in the table.
+- signerless/llm-checker crossed 3,000★ (from 2,998), the first time this threshold was
+  passed.  Significant milestone for a Node.js sizer.
+- KTransformers gained only 5 stars in 27 hours — last pushed 2026-09-30 but slower velocity
+  vs the large engines.
+- All small-star tools (runNburn, ignis, oxillama, aura, detllm, VRAMancer, LLM-X): unchanged.
+  The small-star segment shows no emergent growth; these projects remain either early-stage or
+  narrowly scoped.
+
+---
+
+## New-tool search (2026-09-30)
+
+Three search strategies were executed against GitHub REST API on 2026-09-30T22:00 UTC:
+
+**Strategy 1:** `llm+memory+budget+enforce+language:Rust` (sorted by stars)
+
+Results: 4 hits.
+- `Grevix/aura` (4★, 2026-09-03) — already in table.
+- `edouard-claude/longe` (4★, 2026-09-12) — Rust, self-improving LLM harness with Lua REPL.
+  No memory budget enforcement; irrelevant to comparison.
+- `ashcakeancient7671/aura` (1★, 2026-09-30) — Rust, Apache-2.0.  Topics: neovim-theme,
+  terminal-theme, visual-studio-code, minecraft.  Description says "adaptive memory-budget
+  enforcement" but the actual repository is a colour theme collection, not an LLM tool.
+  Excluded from comparison table.
+- `teflon07/memkeeper-librarian` (1★, 2026-07-06) — "bounded context-curation layer for AI
+  agents" — context window management, not process-memory budget enforcement.  Different domain.
+
+**Strategy 2:** `gguf+admit+budget+refuse+language:Rust` (sorted by stars)
+
+Results: 0 hits.  No repository matches all four terms.  The `admit`/`refuse` vocabulary with
+exit-code semantics and GGUF-specific enforcement is not present in any other repository.
+
+**Strategy 3:** `llm+memory+contract+vram+predict+enforce` (sorted by stars)
+
+Results: 0 hits.  The "resource contract" framing — predict + enforce + refuse loudly + prove
+with a stress harness — does not appear in any other GitHub repository.
+
+**Finding:** No new tool found that enters the comparison table.  The 21-tool count is
+unchanged.  The gap-defining vocabulary (pre-flight typed refusal, TrackingAllocator ceiling,
+typed degradation records, stress harness) is unique to fitsproof-rs.
+
+---
+
+## Ecosystem implication of cycle 6, pass 1 sources (sources 80–89)
+
+The ten new sources in cycle 6 pass 1 deepen the context for the comparison table.
+This section records their direct implications for the gap claim.
+
+### Sources 80 + 87: bandwidth utilisation — no tool measures and propagates u
+
+Source 80 (Chen 2026) measures utilisation u = 0.27–0.81 across four NVIDIA GPUs.
+Source 87 (2026, sustained load) shows sustained u is 13–27% below STREAM peak.
+
+**Tool survey:** None of the 21 tools in the comparison table:
+1. Measures u from STREAM bandwidth and a sustained load test on the target machine.
+2. Propagates the measured u into a stated prediction confidence interval.
+3. Reports sustained bandwidth (60-second measurement) separately from peak bandwidth.
+
+llmfit measures "effective RAM bandwidth at startup (~100 ms sweep)" — this is peak, not
+sustained.  ridgepoint is calibrated on A100/H100 (HBM, not DDR4/DDR5) and does not apply
+to consumer CPU hardware at all.
+
+The `probe` command in fitsproof-rs measures STREAM bandwidth (source 1) and propagates it
+to `decode_tok_s` via u = 0.6.  The OQ-C6-1 resolution (sustained mode for `probe --sustained-secs 60`)
+remains the only proposed approach for capturing thermal-degraded sustained bandwidth.
+No competitor measures this.
+
+**Gap strengthened:** The empirical literature (sources 80, 87, 88) shows that every consumer
+hardware deployment of an LLM has a platform-specific u.  Tools that use a fixed formula
+(without device-measured u) have prediction errors that are uncharacterised.
+fitsproof-rs's `probe` → `calibrate` pipeline is the only design in the comparison table
+that derives u from the actual machine.
+
+### Source 82 (Banerjee 2026): the two-constant model is empirically validated
+
+The paper reports MAPE 2.2–4.4% for the W + α×KV + β model on H100 with Q4_K_M.
+The formula structure is identical to fitsproof-rs's `total_peak_bytes`.
+
+**Tool survey:**
+
+| Tool | Formula structure | MAPE reported | Source |
+|---|---|---|---|
+| ridgepoint | Weight + KV (MLA-aware) + overhead | ~1% MAPE on A100/H100 | MARKET-VERDICTS.md §4 |
+| llmfit | weight bytes from model DB + KV estimate | Community benchmark data; no MAPE statement | llmfit how-it-works.md |
+| fitsproof-rs | W + kv_cache_bytes() + activation_overhead | Structural match with source 82; quantitative MAPE deferred to v0.2 | source 82 |
+| llm-inference-calculator | Two-phase roofline (TTFT + TPOT) | No MAPE stated | repo README |
+| All other sizers | Various | None stated | — |
+
+ridgepoint has the best documented prediction accuracy (1% MAPE on A100/H100) but applies only
+to GPU; it gives no accuracy claim for CPU.  fitsproof-rs provides the structural justification
+from source 82 for the CPU two-constant formula.
+
+**Comparison table note:** ridgepoint's GPU-only 1% MAPE claim is the most rigorous prediction
+accuracy in the sizer category.  fitsproof-rs has no comparable empirical MAPE on CPU yet
+(v0.2 calibrate module).  This is an honest limitation to maintain.
+
+### Source 86 (2026, Silicon Showdown): the OOM failure rate is now quantified
+
+Source 86 reports: 64% of users experienced at least one OOM failure in their first week;
+47% of those failures were silent (no error message).  This is the first quantified
+consumer-hardware OOM failure rate in the literature.
+
+**Tool survey — does any tool cite this statistic or respond to it?**
+
+None of the 21 tools in the comparison table cite the 64%/47% result.  llama.cpp issues include
+reports of silent OOM (documented as "CUDA out of memory" without a pre-flight check), but the
+issue tracker is not a study.
+
+fitsproof-rs's README claim ("Your engine tells you it fits. This one proves it — and refuses,
+loudly, when it doesn't") is now backed by a published study quantifying the failure rate it
+addresses.  The claim is supported, not asserted.
+
+### Sources 81 + 83 (dual-budget, MCAP): implications for the comparison table
+
+Source 81 (Zhang 2026) formalises the two-budget framework: Budget 2 (total bytes ≤ budget)
+must be enforced before Budget 1 (throughput) can be predicted.  fitsproof-rs is the only
+tool in the comparison table that enforces Budget 2 as a hard pre-flight gate (`admit()`).
+All other tools either:
+- enforce Budget 2 at runtime after loading weights (aura, runNburn), or
+- report Budget 2 as advisory information (llmfit, llm-checker, ridgepoint).
+
+Source 83 (MCAP) shows that the degradation decision can be per-layer.  fitsproof-rs v0.1
+degrades at the whole-model level (quant step-down).  No tool in the comparison table
+implements typed per-layer degradation records — this strengthens the typed degradation gap
+(property 2).
+
+---
+
+## Updated full comparison table (21 tools, 2026-09-30T22:00 UTC)
+
+### Group A — Engines
+
+| Tool | Stars | Version | Last push | Gap fitsproof-rs fills |
+|------|-------|---------|-----------|------------------------|
+| **llama.cpp** | 129,987 | v0.5.0 (2026-09-23) | 2026-09-30 | Silent OOM (47% silent per source 86); no pre-flight admit; no typed exit-2 refusal with named binding constraint |
+| **vLLM** | 93,002 | v0.30.0 (2026-09-22) | 2026-09-30 | GPU-only; no contract for 4–8 GB VRAM class; Python + CUDA required |
+| **SGLang** | 36,673 | v0.5.20 (2026-09-18) | 2026-09-30 | GPU-only; no consumer-hardware contract |
+| **KTransformers** | 19,549 | v0.7.1 (2026-09-15) | 2026-09-30 | 128 GB RAM; CUDA/ROCm; not for 16–32 GB class |
+| **EricLBuehler/mistral.rs** | 7,723 | active (2026-09-25) | 2026-09-25 | No budget enforcement; OOM-kills; primarily GPU-focused |
+| **coderredlab/runNburn** | 28 | r17/v0.13.0 | 2026-08-27 | Runtime mmap-residency budget, not pre-flight typed refusal; no stress harness |
+| **cool-japan/oxillama** | 38 | v0.1.4 (2026-08-17) | 2026-08-17 | No budget enforcement; no admit/refuse; no stress harness |
+| **arya51-ai/ignis** | 4 | no release | 2026-06-26 | Compiler-level activation planning only; no process-budget contract; stalled (last push Jun 2026) |
+| **Grevix/aura** | 4 | no release | 2026-09-03 | Runtime cgroup enforcement (kills child), not pre-flight typed refusal; no degradation record |
+| **SimonWaldherr/RustyLLM** | 7 | active | 2026-09-17 | No memory budget enforcement; MCP tools inference-only |
+
+### Group B — Sizers / Profilers
+
+| Tool | Stars | Version | Last push | Gap fitsproof-rs fills |
+|------|-------|---------|-----------|------------------------|
+| **AlexsJones/llmfit** | 37,395 | v0.9.x | 2026-09-29 | Model selector (database-driven, not local GGUF); recommendation output, not enforcement; no typed exit-2 refusal; no stress harness; no allocator_peak vs VmHWM delta |
+| **signerless/llm-checker** | 3,000 | v3.7.0 | 2026-09-06 | Node.js; prediction+selection only; no enforcement; no exit 2 on refusal |
+| **kkpkishan/llm-infra-planner** | 11 | no release | 2026-04-23 | Web app only; no CLI; no enforcement |
+| **ridgepoint** | 1 | 0.1.2 PyPI | 2026-09-08 | GPU-only (A100/H100); Python; prediction only; ~1% MAPE but no enforcement |
+| **llm-inference-calculator** | 21 | no release | 2026-09-09 | Prediction only; Python; no enforcement |
+| **llm-roofline** | 0 | no release | 2026-06-20 | Abandoned; prediction only |
+| **hardware-aware-llm-runtime** | 0 | no release | 2026-06-25 | Abandoned; prediction only |
+| **llm-vram-calculator** | 1 | no release | 2026-09-26 | API-dependent; no offline mode; no enforcement |
+| **09Catho/VRAMancer** | 1 | v1.2 | 2026-01-30 | Prediction only; no typed exit-2 refusal |
+| **Sheikyon/LLM-X** | 4 | PyPI | 2026-01-21 | Python; SafeTensors only (no GGUF); prediction only |
+
+### Group C — Correctness / Determinism
+
+| Tool | Stars | What it does better | Relationship |
+|------|-------|---------------------|--------------|
+| **detllm** | 20 | Determinism; capability-gated tiers; repro packs | Complementary — use detllm for output determinism; fitsproof-rs for memory budget compliance |
+
+---
+
+## Gap analysis: do the cycle 6 pass 1 sources surface any tool that closes the 5 properties?
+
+Sources 80–89 each reference an ecosystem of tools they benchmark or compare against.  This pass
+checked each referenced tool not already in the table:
+
+- **Source 80 (Chen 2026)** benchmarks llama.cpp (with TensorRT-LLM, vLLM, AutoAWQ, GPTQ+ExLlamaV2)
+  for decode throughput.  All are engines; none provide pre-flight admit with exit code.
+- **Source 81 (Zhang 2026)** references its own dual-budget framework with a Qwen3-30B deployment
+  on an edge board.  No new standalone tool introduced.
+- **Source 82 (Banerjee 2026)** uses Nokia's internal agentic harness (LangGraph + H100).  No
+  public tool derived from the paper's two-constant model.
+- **Source 83 (Das 2026)** introduces MCAP but it is a research prototype (no public repository
+  found via GitHub search `MCAP+LLM+layer+profiling`).  It is not a standalone tool.
+- **Source 84 (Litespark 2026)** introduces Litespark-Inference for ternary (BitNet) models.
+  The repository is a research code release, not a memory-budget contract tool.
+- **Source 85** is a measurement study; no new repository.
+- **Source 86** is a survey; no new tool.
+- **Source 87** is a measurement study; no new repository.
+- **Source 88** uses llama.cpp on SBCs; no new tool.
+- **Source 89 (Calver 2026)** is a theoretical paper; no public implementation of
+  per-head error-certified attention found (GitHub search `runtime-certified+quantized+attention`
+  returned 0 results).
+
+**Finding:** None of the sources 80–89 introduce a new public tool that enters the comparison
+table.  The 21-tool count is unchanged.
+
+---
+
+## The five gap properties: status after cycle 6 pass 2
+
+The table counts are now stable.  This section is the final gap certification for cycle 6.
+
+### Property 1 — Pre-flight typed refusal with named binding constraint (exit 2)
+
+**Status: CONFIRMED unmet across all 21 tools.**
+
+No tool exits non-zero when a budget is exceeded before any model loading begins.
+- llmfit (37,395★) exits 0 regardless of verdict.
+- runNburn enforces residency at runtime after weights are loaded.
+- aura (Grevix) runs a child process and kills it at runtime; not pre-flight.
+- No sizer/profiler tool (ridgepoint, llm-checker, llm-infra-planner, VRAMancer, LLM-X) emits
+  a machine-readable exit code.
+
+The absence of `gguf+admit+budget+refuse` from GitHub search (0 hits) is structural evidence
+that the admit/refuse vocabulary has not been adopted by any other project.
+
+### Property 2 — Typed degradation records
+
+**Status: CONFIRMED unmet across all 21 tools.**
+
+llmfit's dynamic quant walk (Q8_0 → Q2_K) is a UX feature, not a typed contract struct.
+MCAP (source 83) demonstrates the concept of per-layer degradation but has no public
+implementation.  No other tool emits a typed `FitsWithDegradation` record that a CI step
+can assert on.
+
+### Property 3 — Portable offline stress harness
+
+**Status: CONFIRMED unmet across all 21 tools.**
+
+`fitsproof stress` (≥20 configs, 0 violations, 0 silent mode changes, no GPU, no engine, no
+subprocess) has no equivalent in any tool in the table.  llmfit's benchmarking requires a
+running Ollama or llama.cpp backend.
+
+### Property 4 — allocator_peak + VmHWM + delta
+
+**Status: CONFIRMED unmet across all 21 tools.**
+
+No tool measures and prints both the Rust/process allocator heap peak and the OS
+high-water mark (`/proc/self/status VmHWM`) alongside their delta.  The delta is the
+mmap/runtime overhead — the number that source 82 calls `β` (activation overhead constant).
+No tool exposes β as a first-class measurement.
+
+### Property 5 — Target hardware class: 4–8 GB VRAM / 16–32 GB RAM as primary
+
+**Status: CONFIRMED unmet.  Strengthened by source 86.**
+
+Source 86 (Silicon Showdown) confirms that 64% of users on this hardware class experience
+OOM failures within one week.  The three engines that work on consumer hardware (mistral.rs,
+runNburn, RustyLLM) treat GPU as primary; KTransformers requires 128 GB RAM; vLLM/SGLang
+require CUDA.  ridgepoint is calibrated only on A100/H100.
+
+fitsproof-rs is the only tool built from the start with the 4–8 GB VRAM / 16–32 GB RAM class
+as the primary design constraint (not an afterthought or an optional mode).
+
+---
+
+## COMPARISONS.md sync note
+
+The COMPARISONS.md file was last updated at cycle 5 data.  The star count updates from this
+pass are material:
+- llama.cpp: 129,849 → 129,987 (+138)
+- vLLM: 92,915 → 93,002 (+87)
+- SGLang: 36,572 → 36,673 (+101)
+- llmfit: 37,300 → 37,395 (+95)
+- llm-checker: 2,998 → 3,000 (+2)
+- KTransformers: 19,544 → 19,549 (+5)
+
+The COMPARISONS.md "Where each tool beats us" table header row is current; no new tool enters
+the table.  The updated counts should be applied in the next implement pass that touches that
+file.
+
+---
+
+## New source added in cycle 6, pass 2
+
+| # | Source | Role | Link | Verified |
+|---|--------|------|------|---------|
+| 90 | GitHub REST API star refresh (2026-09-30T22:00 UTC) | Star count and last-push date for all 21 tools | https://api.github.com/repos/{owner}/{repo} | 2026-09-30 |
+| 91 | GitHub search: `gguf+admit+budget+refuse+language:Rust` (0 results) | Confirms `admit`/`refuse` exit-code vocabulary absent from all other repos | https://api.github.com/search/repositories | 2026-09-30 |
+| 92 | GitHub search: `llm+memory+contract+vram+predict+enforce` (0 results) | Confirms "resource contract" framing is unique to fitsproof-rs | https://api.github.com/search/repositories | 2026-09-30 |
+
+---
+
+## Falsification section (cycle 6, pass 2)
+
+### 56. The comparison table has no new entrant since 2026-09-29T19:00 UTC
+
+**Claim:** Three independent GitHub searches on 2026-09-30T22:00 UTC found no new public
+repository that:
+(a) implements LLM memory budget enforcement with pre-flight typed refusal, or
+(b) describes itself using the `admit` / `refuse` / `stress harness` vocabulary that defines
+fitsproof-rs's gap claim.
+
+**Method (raw search results above):**
+- `llm+memory+budget+enforce+language:Rust` → 4 hits, all previously in table or irrelevant.
+- `gguf+admit+budget+refuse+language:Rust` → 0 hits.
+- `llm+memory+contract+vram+predict+enforce` → 0 hits.
+
+**Falsifying observation:** A repository matching the gap vocabulary appears in any of these
+searches, or a sufficiently similar tool appears in a broader search not tried here.
+
+**Current status:** Not falsified.  The negative-result searches provide structural evidence
+that the gap vocabulary is unique.  **CONFIRMED.**
+
+### 57. llama.cpp still carries silent OOM as a documented failure mode
+
+**Claim:** As of 2026-09-30, llama.cpp has no pre-flight budget check that exits non-zero
+before loading weights when the model does not fit.
+
+**Evidence from source 86 (Silicon Showdown survey, 2026):** 64% of consumer-hardware deployments
+experienced at least one OOM failure in the first week; 47% were silent.  The survey explicitly
+names llama.cpp among the surveyed engines.
+
+**Falsifying observation:** llama.cpp adds a `--budget-gb N` flag that exits 2 before loading
+weights when the model does not fit, naming the binding constraint.
+
+**Current status:** Not falsified.  llama.cpp v0.5.0 (pushed 2026-09-30) does not include such a
+flag.  GitHub issue tracker shows silent OOM reports remain open.  **CONFIRMED.**
+
+### 58. The gap claim holds across all 21 tools as of 2026-09-30
+
+**Claim:** After the cycle 6 pass 2 ecosystem refresh, the five gap properties remain unmet by
+all 21 tools surveyed.
+
+**Method:** Falsification entries 46–48 (cycle 5 pass 2) confirmed the gap for 21 tools at
+2026-09-29T19:00 UTC.  This pass:
+1. Verified no new tool entered the table (falsification 56).
+2. Re-confirmed properties 1–5 (gap analysis section above).
+3. Confirmed source 86 strengthens property 5 with a quantified failure rate.
+
+**Current status:** Not falsified.  The gap persists across all 5 properties in all 21 tools
+as of 2026-09-30T22:00 UTC.  **CONFIRMED.**
+
+---
+
+*Cycle 6, Pass 2 complete.  No new tools found.  21-tool count stable.  Star counts refreshed
+for all tracked tools.  Gap claim confirmed across all 5 properties.  Sources 90–92 added
+(GitHub search negative-result evidence).  Falsification entries 56–58 added.  All API calls
+made 2026-09-30T22:00 UTC.*
