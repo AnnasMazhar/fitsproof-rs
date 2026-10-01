@@ -1,0 +1,23 @@
+# cargo-mutants configuration for fitsproof-rs.
+#
+# The full test suite takes ~5 minutes (cmd_integration.rs spawns the binary
+# with 5s timeouts; stress.rs runs 25 configs each ~2s). Running all tests for
+# every mutant would take hours. This configuration runs only the fast suites
+# (lib, bin unit tests, contract_mutants, adversarial) which together take ~40s
+# per mutant.
+#
+# cmd_integration.rs, stress.rs, and value/test_incumbent_gap.rs are integration tests
+# that test the binary surface; their mutation-killing power is redundant with
+# the lib tests for the cost/plan/admit modules targeted here.
+#
+# --bin=fitsproof was added in c6-p08 to cover the unit tests in src/main.rs
+# (parse_budget_gb, count_violations_and_changes) which are binary-scope tests.
+
+# Run only the fast test suites for mutation testing.
+additional_cargo_test_args = [
+    "--lib",
+    "--bin=fitsproof",
+    "--test=contract_mutants",
+    "--test=adversarial",
+    "--test=test_incumbent_gap",
+]

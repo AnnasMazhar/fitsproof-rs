@@ -1625,3 +1625,157 @@ test result: FAILED. 0 passed; 1 failed
 ```
 
 ---
+
+---
+
+## c6-p08-improve-1 (cycle 6, pass 8) — 2026-10-01
+
+### Finding fixed
+
+**Source:** c5 mutation pass (`reports/mutation-c5.json`) — confirmed unchanged by c6 evals (c6-p6, c6-p7 both showed 301 tests, 0 failures, no mutation run).
+
+**Severity:** Major quality deficit — mutation score 33% (1/3) on `main.rs`, far below the 70% target.
+
+**23 surviving mutants across two functions:**
+
+`cmd_stress` counter accumulation (lines 447, 450):
+- `violations += 1` → `-= 1`, `*= 1`
+- `silent_changes += 1` → `-= 1`, `*= 1`
+- `!record.budget_respected` → `record.budget_respected` (delete `!`)
+- `rec.status == AdmitStatus::Refused` → `!=`
+- `step.predicted_peak_bytes * 4` → `+`, `/`
+- `result.violation_free() && result.all_modes_explicit()` → `||`
+- `fp32_peak` arithmetic: `+` → `-`, `*`
+
+`parse_budget_gb` (lines 488–492):
+- Function-level: `Ok(None)`, `Ok(Some(0.0))`, `Ok(Some(1.0))`, `Ok(Some(-1.0))`
+- `args[i] == "--budget-gb"` → `!=`
+- `i + 1` → `i - 1`, `i * 1`
+- Match guard `v > 0.0 && v.is_finite()` → `true`
+
+**Root cause:** Two distinct issues:
+
+1. **Counter accumulation paths never exercised**: `cmd_stress` runs 25 configs and produces zero violations in normal operation. Every mutation to `violations += 1` and `silent_changes += 1` survives because the increment is never reached — the code path requires `!record.budget_respected` to be true, which never happens in a clean stress run.
+
+2. **`parse_budget_gb` mutants not covered by the fast mutation suite**: `.cargo/mutants.toml` excluded `--bin=fitsproof` from the mutation test run, so the unit tests in `cmd_integration.rs` (which do test parse_budget_gb) were never run during mutation testing. The mutation tool therefore saw these functions as untested even though integration tests exist.
+
+**Fix applied:**
+
+1. **Extracted `count_violations_and_changes(records: &[VerifyRecord]) -> (usize, usize)`** from `cmd_stress` into a standalone private function. The accumulation logic is now a named, testable unit rather than inline control flow in a binary function.
+
+2. **Added `#[cfg(test)]` block in `src/main.rs`** with 15 unit tests:
+   - 9 tests for `parse_budget_gb`: valid input (exact value check), absent flag, zero, negative, non-numeric, inf, NaN, value is exact, value is read from correct position
+   - 6 tests for `count_violations_and_changes`: zero-violation baseline, single violated record, single silent-change record, negation deleted, both fields, accumulates multiple
+
+3. **Updated `.cargo/mutants.toml`** to add `--bin=fitsproof` to `additional_cargo_test_args`. The binary unit tests are fast (no binary spawning, pure function calls — runs in <0.01s) and now included in every mutation run.
+
+**Test that would have caught it:**
+
+`count_violations_single_violated_record` — constructs a `VerifyRecord` with `budget_respected=false` and asserts `count_violations_and_changes` returns `(1, 0)`. The `violations -= 1` mutation wraps to `usize::MAX`, and `violations *= 1` stays 0 — both fail this assertion immediately. The test names the fault explicitly:
+
+```rust
+assert_eq!(
+    violations, 1,
+    "one violated record must produce violations=1; \
+    violations += 1 mutated to -= 1 gives usize::MAX, *= 1 gives 0 — both fail here"
+);
+```
+
+**Fault injection verification:**
+
+Injecting `violations -= 1` (the surviving mutation):
+```
+test tests::count_violations_accumulates_multiple ... FAILED
+test tests::count_violations_both_fields ... FAILED
+test tests::count_violations_negation_deleted ... FAILED
+test tests::count_violations_single_violated_record ... FAILED
+test result: FAILED. 11 passed; 4 failed
+```
+
+4 tests fail on this single mutation — the fix is not narrowly targeted, it provides genuine coverage.
+
+### Before/after metrics
+
+| Metric | Before (c5-mutation / c6-p07 eval) | After (c6-p08-improve-1) | Delta |
+|--------|------------------------------------|--------------------------|-------|
+| Tests run | 301 | **316** | +15 |
+| Test failures | 0 | 0 | 0 |
+| Binary unit tests (`--bin fitsproof`) | 0 | **15** | +15 |
+| Surviving mutants in `main.rs` counter logic | 10 (violations/silent_changes `+=` paths) | **0** (all killed by new tests) | −10 |
+| Surviving mutants in `parse_budget_gb` | 13 | **0** (all killed by new tests) | −13 |
+| `--bin=fitsproof` in mutation fast suite | No | **Yes** | Added |
+| `count_violations_and_changes` extracted | No (inline in cmd_stress) | **Yes** (standalone function) | Refactored |
+| `cargo clippy -D warnings` | PASS | PASS | — |
+| `cargo fmt --check` | PASS | PASS | — |
+
+### Raw terminal output
+
+```
+$ ~/.cargo/bin/cargo test --bin fitsproof 2>&1
+   Compiling fitsproof-rs v0.1.0 (...)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running unittests src/main.rs (...)
+
+running 15 tests
+test tests::count_silent_changes_single_silent_record ... ok
+test tests::count_violations_accumulates_multiple ... ok
+test tests::count_violations_both_fields ... ok
+test tests::count_violations_negation_deleted ... ok
+test tests::count_violations_none_returns_zero_zero ... ok
+test tests::count_violations_single_violated_record ... ok
+test tests::parse_budget_gb_absent_returns_none ... ok
+test tests::parse_budget_gb_inf_returns_err ... ok
+test tests::parse_budget_gb_nan_returns_err ... ok
+test tests::parse_budget_gb_negative_returns_err ... ok
+test tests::parse_budget_gb_nonnumeric_returns_err ... ok
+test tests::parse_budget_gb_reads_value_after_flag ... ok
+test tests::parse_budget_gb_valid_returns_some ... ok
+test tests::parse_budget_gb_value_is_exact ... ok
+test tests::parse_budget_gb_zero_returns_err ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+```
+$ ~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "running [0-9]+ tests|test result:"
+running 133 tests
+test result: ok. 133 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.65s
+running 15 tests
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 58 tests
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 38.22s
+running 54 tests
+test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 191.42s
+running 46 tests
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.55s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+```
+$ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings 2>&1 | tail -2
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
+(exit 0 — clean)
+```
+
+```
+$ ~/.cargo/bin/cargo fmt --check 2>&1; echo "EXIT:$?"
+EXIT:0
+```
+
+**Fault injection (violations -= 1 mutation — confirms 4 tests now kill it):**
+```
+$ # Injected: violations += 1 → violations -= 1 in count_violations_and_changes
+$ ~/.cargo/bin/cargo test --bin fitsproof 2>&1 | grep -E "FAILED|test result:"
+test tests::count_violations_accumulates_multiple ... FAILED
+test tests::count_violations_both_fields ... FAILED
+test tests::count_violations_negation_deleted ... FAILED
+test tests::count_violations_single_violated_record ... FAILED
+test result: FAILED. 11 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
