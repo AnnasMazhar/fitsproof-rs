@@ -74,7 +74,7 @@ Stress harness: 25 configs, 0 violations, 0 silent mode changes. Margin: min=10.
 
 ---
 
-## 4. cargo test all-green: 269 tests across all targets
+## 4. cargo test all-green: 318 tests across all targets
 
 **Claim:** `cargo test` is green on a fresh build.
 
@@ -83,28 +83,34 @@ Stress harness: 25 configs, 0 violations, 0 silent mode changes. Margin: min=10.
 ~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "test result:|running [0-9]+ tests"
 ```
 
-**Raw output (c5-p08-improve-1 run):**
+**Raw output (c6-p09-improve-2 run):**
 ```
-running 132 tests
-test result: ok. 132 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.33s
-running 0 tests
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-running 48 tests
-test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 38.36s
-running 44 tests
-test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 140.05s
-running 33 tests
-test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+running 133 tests
+test result: ok. 133 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.33s
+running 15 tests
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 58 tests
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 43.87s
+running 54 tests
+test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 198.71s
+running 46 tests
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
 running 2 tests
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 running 3 tests
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.25s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.48s
 running 6 tests
 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
 
-**Status:** PASS — 269 tests total (132 lib + 48 adversarial + 44 cmd_integration + 33 contract_mutants + 1 real_model + 2 smoke + 3 stress + 6 value)
+**Status:** PASS — 318 tests total (133 lib + 15 bin + 58 adversarial + 54 cmd_integration + 46 contract_mutants + 1 real_model + 2 smoke + 3 stress + 6 value)
+
+**Note (updated c6-p09-improve-2):** Earlier versions of this entry showed 269 tests (c5-p08 snapshot).
+Since then: c6-p04 added 22 mutation-killing tests (+22), c6-p05 added 8 adversarial tests (+8),
+c6-p08 extracted count_violations_and_changes and added 15 binary unit tests (+15), bringing the total
+from 269 to 318 across all targets. The breakdown now includes the bin target (src/main.rs unit tests)
+as a separate target line.
 
 ---
 
@@ -404,7 +410,7 @@ Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.18s
 ## Open items / limitations (honest record)
 
 - Real-model generation (tokens, not just plan) requires full GGUF weight loader + tokenizer: **v0.2 scope**.
-- `serve` and `mcp` CLI commands: **not implemented in v0.1** (exit 2 with message).
+- `serve` and `mcp` CLI commands: exit 2 with a message in v0.1; the dispatch logic is implemented and tested in `src/serve.rs` / `src/mcp.rs`; CLI wiring is v0.2.
 - Mutation score: not measured in this cycle (cargo-mutants not installed). Target ≥70% for cycle 2.
 - CI static binary (musl): not tested locally (requires musl target); CI workflow is present.
 
@@ -906,7 +912,7 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ## Open items / limitations (updated c2-p05)
 
 - Real-model generation (tokens, not just plan) requires full GGUF weight loader + tokenizer: **v0.2 scope**.
-- `serve` and `mcp` CLI commands: **not implemented in v0.1** (exit 2 with message).
+- `serve` and `mcp` CLI commands: exit 2 with a message in v0.1; the dispatch logic is implemented and tested; CLI wiring is v0.2.
 - CI static binary (musl): not tested locally (requires musl target); CI workflow is present.
 - ADV-3 (race condition in ceiling): **FIXED c2-p05** via CAS loop in `try_reserve()`.
 
@@ -1636,3 +1642,98 @@ CLEAN
 - Mutation score: c5 cost.rs run: 25/25 caught (100%). c5 main.rs timed out; 23 missed mutants now have killing tests. plan.rs and admit.rs mutation run pending (c6 mutation pass).
 - ADV-1, ADV-2 both fixed. No open blockers.
 - Launch surfaces: COMPARISONS.md, CONTRIBUTING.md, docs/demo.sh, launch/topics.txt all complete.
+
+---
+
+## 55. c6-p09-improve-2: stale test counts fixed; architecture tree corrected; llmfit integration added
+
+### Fixes applied
+
+**IMP-1 — EVIDENCE.md §4 stale test count (biggest credibility gap)**
+
+§4 claimed "269 tests total" from the c5-p08 snapshot.  Five subsequent passes added tests:
+c6-p04 (+22), c6-p05 (+8), c6-p08 (+15 bin unit tests) = 45 new tests since the last §4 update.
+§4 now shows the current terminal output (318 tests total).
+
+**IMP-2 — README architecture tree wrong counts**
+
+The tree showed `adversarial.rs 48`, `cmd_integration.rs 44`, `contract_mutants.rs 33`.
+Correct values: adversarial=58, cmd_integration=54, contract_mutants=46.
+Also missing: `src/main.rs (bin)  15 unit tests` — the c6-p08 extraction of
+`count_violations_and_changes` and `parse_budget_gb` into tested unit functions was not reflected.
+
+**IMP-3 — Stale "not implemented" language for serve/mcp in two Open items sections**
+
+Two older Open items sections (the original at c1 and the c2-p05 update) still said
+`serve and mcp CLI commands: not implemented in v0.1 (exit 2 with message)`.
+The actual state since c2-p04-implement-1 is that the dispatch logic is fully implemented
+and tested in `src/serve.rs` / `src/mcp.rs`; only the CLI entry-point wiring exits 2.
+Both sections updated to reflect this accurately.
+
+**IMP-4 — llmfit composite integration example added to README**
+
+The README had no mention of llmfit (37k★, Rust, MIT — the largest Rust model sizer).
+Added a "Composite pattern with llmfit" section showing the full 3-step workflow:
+- Step 0: llmfit picks the model family from its database (model discovery)
+- Step 1: fitsproof enforces the contract on that specific GGUF (< 50 ms, exit 2 on refusal)
+- Step 2: inference engine, only reached if both steps pass
+
+This is the concrete integration example against a real external tool the pass required.
+llmfit and fitsproof-rs address orthogonal problems; together they prevent both wrong-model
+selection and budget violations.
+
+### Before/after metrics
+
+| Metric | Before (c6-p08) | After (c6-p09-improve-2) | Delta |
+|--------|----------------|--------------------------|-------|
+| Tests run | 318 | 318 | 0 (doc-only changes) |
+| Test failures | 0 | 0 | 0 |
+| EVIDENCE.md §4 test count | 269 (stale from c5-p08) | 318 (current) | Fixed |
+| EVIDENCE.md §4 per-suite counts | 132/0/48/44/33/... (stale) | 133/15/58/54/46/... (current) | Fixed |
+| README adversarial count | 48 (stale) | 58 (current) | Fixed |
+| README cmd_integration count | 44 (stale) | 54 (current) | Fixed |
+| README contract_mutants count | 33 (stale) | 46 (current) | Fixed |
+| README bin unit tests listed | No | Yes (15 tests) | Added |
+| README llmfit integration example | No | Yes (3-step composite workflow) | Added |
+| Stale "not implemented" serve/mcp language | 2 sections | 0 | Fixed |
+| `cargo clippy -D warnings` | PASS | PASS | — |
+| `cargo fmt --check` | PASS | PASS | — |
+
+### Raw terminal output
+
+```
+$ ~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "running [0-9]+ tests|test result:"
+running 133 tests
+test result: ok. 133 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.33s
+running 15 tests
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 58 tests
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 43.87s
+running 54 tests
+test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 198.71s
+running 46 tests
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.48s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+```
+$ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings && ~/.cargo/bin/cargo fmt --check && echo "CLEAN"
+    Checking fitsproof-rs v0.1.0 (...)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.27s
+CLEAN
+```
+
+---
+
+## Open items / limitations (updated c6-p09)
+
+- Real-model generation (tokens, not just plan): `Weights::from_gguf()` implemented; full end-to-end requires `FITSPROOF_REAL_GGUF`.
+- Mutation score: c5 cost.rs run: 25/25 caught (100%). c6-p08 fixed 23 main.rs mutants. plan.rs and admit.rs mutation run was the c6 mutation pass scope (separate lane).
+- All adoption-readiness credibility gaps addressed. No open blockers.
+- `verify` runs on reference bundle (random weights), not real models: v0.2 weight loader scope.

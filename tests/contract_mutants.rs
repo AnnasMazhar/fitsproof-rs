@@ -604,6 +604,72 @@ fn weight_bytes_per_layer_component_exact_fp32() {
     );
 }
 
+/// Fault detected: any `*` → `+` or `*` → `-` mutation in the per-layer attention or FFN
+/// formula for the fp16 model path (`weight_bytes(&cfg, "float16")`).
+///
+/// The existing fp16 coverage (`quant_bits_bytes_per_element_exact_values`) asserts only
+/// bounds: `fp16 < fp32` and `fp16 > 1_574_400`.  These bounds are too loose to catch
+/// arithmetic mutations in the layer formulas:
+/// - `*` → `+` in `attn_per_layer` for fp16: produces ~393_218 per layer vs correct 786_432
+///   (total would be ~24_372_224 — still satisfies fp16 > 1_574_400 AND fp16 < fp32)
+/// - `*` → `+` in `ffn_per_layer` for fp16: produces ~3_538_946 per layer vs correct 3_538_944
+///   (total changes by only 12 — undetectable by bounds)
+///
+/// This test pins the exact total and isolates the per-layer contribution by subtracting the
+/// constant embed + final terms, forcing any per-layer mutation to fail immediately.
+///
+/// Hand-computed for reference config (6L, 384H, 6Q-heads, 2KV-heads, 64 hd, 1536 ff, 512V)
+/// at float16 (2 bytes/element; fp16 = 2 bytes for embed/unembed per GGUF convention):
+///
+///   embed            = 512 * 384 * 2 = 393_216  (fp16)
+///   attn Q/layer     = 6 * 64 * 384 * 2 = 589_824
+///   attn K/layer     = 2 * 64 * 384 * 2 = 196_608
+///   attn V/layer     = 2 * 64 * 384 * 2 = 196_608
+///   attn O/layer     = 384 * 6 * 64 * 2 = 589_824
+///   attn/layer total = 786_432
+///   ffn gate/layer   = 1536 * 384 * 2 = 1_179_648
+///   ffn up/layer     = 1_179_648;  ffn down/layer = 1_179_648
+///   ffn/layer total  = 3_538_944
+///   norm/layer       = 2 * 384 * 4 = 3_072  (fp32 — unchanged)
+///   per-layer total  = 786_432 + 3_538_944 + 3_072 = 4_328_448
+///   6 layers         = 25_970_688
+///   final_norm       = 384 * 4 = 1_536  (fp32)
+///   unembed          = 512 * 384 * 2 = 393_216  (fp16)
+///   TOTAL            = 393_216 + 25_970_688 + 1_536 + 393_216 = 26_758_656
+///
+/// Source: cost.rs weight_bytes formula traced term by term; embed dtype from RESEARCH.md §1933.
+#[test]
+fn weight_bytes_per_layer_component_exact_fp16() {
+    let cfg = ModelConfig::reference();
+
+    // Exact total — pin this to kill any arithmetic mutation in the fp16 path.
+    let total = cost::weight_bytes(&cfg, "float16");
+    assert_eq!(
+        total, 26_758_656,
+        "weight_bytes float16 total must be 26_758_656 — \
+         attn*→+ mutation produces ~24_372_224, ffn*→+ produces slightly wrong ffn"
+    );
+
+    // Isolate per-layer contribution by subtracting constant terms.
+    // embed (fp16) = 512 * 384 * 2 = 393_216
+    // final = 384 * 4 (fp32 norm) + 512 * 384 * 2 (fp16 unembed) = 1_536 + 393_216 = 394_752
+    let embed: u64 = 512 * 384 * 2;
+    let final_w: u64 = 384 * 4 + 512 * 384 * 2;
+    let per_layer_total = total - embed - final_w;
+    assert_eq!(
+        per_layer_total, 25_970_688,
+        "fp16 6-layer weight contribution must be 25_970_688"
+    );
+
+    // Per-layer average: any single-layer arithmetic mutation changes this.
+    let per_layer_avg = per_layer_total / 6;
+    assert_eq!(
+        per_layer_avg, 4_328_448,
+        "fp16 per-layer avg must be 4_328_448 \
+         (attn=786_432 + ffn=3_538_944 + norm=3_072)"
+    );
+}
+
 /// Fault detected: replacing + with - in the embed+final summation (lines 118:31, 120:18/74).
 /// With replace + with -, final_bytes = d*4 - v*d*4 (negative for realistic models).
 /// Verified by checking: weight_bytes with 1 layer vs 0-layer model structure.

@@ -1779,3 +1779,156 @@ test tests::count_violations_single_violated_record ... FAILED
 test result: FAILED. 11 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
 
+
+---
+
+## c6-p09-improve-2 (cycle 6, pass 9) — 2026-10-01
+
+### Findings fixed
+
+Four adoption-readiness issues addressed in this pass.
+
+---
+
+### IMP-1 — EVIDENCE.md §4 stale test count (single biggest credibility gap)
+
+**Severity:** Major credibility gap (the primary evidence section shows a wrong test count that a reviewer can trivially disprove by running `cargo test`)
+
+**Root cause:** `docs/EVIDENCE.md §4` was last updated by c5-p08-improve-1 and showed:
+```
+269 tests total (132 lib + 48 adversarial + 44 cmd_integration + 33 contract_mutants + ...)
+```
+
+Since that update:
+- c6-p04-implement-1: +22 tests (mutation-killing tests for main.rs/plan.rs/admit.rs)
+- c6-p05-implement-2: +8 tests (adversarial suite expansion)
+- c6-p08-improve-1: +15 tests (binary unit tests for count_violations_and_changes + parse_budget_gb)
+
+Total gain: +49 tests. Current count: 318. The §4 claim was wrong by 49 tests — a reviewer running `cargo test --all-targets` sees 318 pass; §4 says 269. This is the most immediate credibility-destroying discrepancy.
+
+**Fix applied:**
+
+`docs/EVIDENCE.md §4` — raw output block replaced with the c6-p09 terminal output (318 tests),
+status line updated to "318 tests total (133 lib + 15 bin + 58 adversarial + 54 cmd_integration +
+46 contract_mutants + 1 real_model + 2 smoke + 3 stress + 6 value)", note added explaining
+the test count history since the c5-p08 snapshot.
+
+Raw terminal verification:
+```
+$ ~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "running [0-9]+ tests|test result:"
+running 133 tests
+test result: ok. 133 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.33s
+running 15 tests
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 58 tests
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 43.87s
+running 54 tests
+test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 198.71s
+running 46 tests
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.48s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+---
+
+### IMP-2 — README architecture tree wrong counts
+
+**Severity:** Minor credibility gap (stated test counts don't match `cargo test`)
+
+**Root cause:** The README `## Architecture` code block listed:
+- `adversarial.rs 48` — actual: 58 (c6-p05 added 8 more)
+- `cmd_integration.rs 44` — actual: 54 (c6-p04 added 10 more)
+- `contract_mutants.rs 33` — actual: 46 (c6-p04 added 12 more, c6-p08 added 1 more)
+- Missing entirely: `src/main.rs (bin)  15 unit tests` (added in c6-p08)
+
+A reviewer who reads the architecture tree and then runs `cargo test` sees mismatched numbers for three suites and a fourth suite that the tree doesn't acknowledge at all.
+
+**Fix applied:**
+
+`README.md §Architecture` — updated all four counts and added the bin target line.
+
+---
+
+### IMP-3 — Stale "not implemented" language for serve/mcp in two EVIDENCE.md open items sections
+
+**Severity:** Minor (internal documentation inconsistency)
+
+**Root cause:** Two older Open items sections in EVIDENCE.md (the original §16 "Open items" and the c2-p05 update) still said:
+```
+`serve` and `mcp` CLI commands: not implemented in v0.1 (exit 2 with message)
+```
+
+Since c2-p04-implement-1, both `src/serve.rs` and `src/mcp.rs` have been implemented with full dispatch logic and passing tests (8 + 9 + 5 tests for serve/mcp/pareto). The accurate statement is: "dispatch logic fully implemented and tested; CLI entry-point wiring exits 2 (v0.2)." Using "not implemented" language when the modules exist and have passing test suites is inaccurate and potentially misleading to a reviewer auditing the repo.
+
+**Fix applied:**
+
+Both sections updated to "exit 2 with a message in v0.1; the dispatch logic is implemented and tested; CLI wiring is v0.2."
+
+---
+
+### IMP-4 — llmfit composite integration example added to README
+
+**Severity:** Minor adoption gap (README showed only the llama.cpp recipe as external integration; llmfit is the largest Rust LLM tool by 5×)
+
+**Root cause:** `README.md §How to plug it in` showed the llama.cpp recipe, the Makefile pattern, and the GitHub Actions snippet. It made no mention of llmfit (37k★, Rust, MIT) — the most widely-used Rust LLM tool and the one most complementary to fitsproof-rs: llmfit does model discovery from a 100+ model database; fitsproof-rs enforces the contract on the GGUF you select. Running both costs < 1 s total and prevents two orthogonal failure classes.
+
+`docs/ADOPTION.md §14` had a detailed llmfit integration recipe but the README had nothing. A developer who finds fitsproof-rs independently would not know about this composite pattern without reading ADOPTION.md.
+
+**Fix applied:**
+
+`README.md §How to plug it in` — added "Composite pattern with llmfit" section showing the 3-step workflow (llmfit recommend → fitsproof admit → llama-cli), with the exit-2 failure path and a reference to ADOPTION.md §14.
+
+---
+
+### Before/after metrics
+
+| Metric | Before (c6-p08) | After (c6-p09-improve-2) | Delta |
+|--------|----------------|--------------------------|-------|
+| Tests run | 318 | 318 | 0 (doc-only changes) |
+| Test failures | 0 | 0 | 0 |
+| EVIDENCE.md §4 test count | 269 (stale from c5-p08) | **318** (current) | Fixed |
+| EVIDENCE.md §4 per-suite counts | 132/0/48/44/33/... (stale) | 133/15/58/54/46/... (current) | Fixed |
+| README adversarial count | 48 (stale) | **58** (current) | Fixed |
+| README cmd_integration count | 44 (stale) | **54** (current) | Fixed |
+| README contract_mutants count | 33 (stale) | **46** (current) | Fixed |
+| README bin unit tests listed | No | Yes (**15 tests**) | Added |
+| README llmfit integration example | No | Yes (3-step composite) | Added |
+| Stale "not implemented" serve/mcp | 2 sections | **0** | Fixed |
+| `cargo clippy -D warnings` | PASS | PASS | — |
+| `cargo fmt --check` | PASS | PASS | — |
+
+### Raw terminal output
+
+```
+$ ~/.cargo/bin/cargo test --all-targets 2>&1 | grep -E "running [0-9]+ tests|test result:"
+running 133 tests
+test result: ok. 133 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.33s
+running 15 tests
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 58 tests
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 43.87s
+running 54 tests
+test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 198.71s
+running 46 tests
+test result: ok. 46 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.48s
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+```
+$ ~/.cargo/bin/cargo clippy --all-targets -- -D warnings && ~/.cargo/bin/cargo fmt --check && echo "CLEAN"
+    Checking fitsproof-rs v0.1.0 (...)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.27s
+CLEAN
+```

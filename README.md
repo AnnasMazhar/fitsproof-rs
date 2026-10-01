@@ -160,6 +160,31 @@ REFUSED: needs 2.420 GB (weight=1.950 GB, kv=0.470 GB, activation=0.000 GB), bud
 
 Full recipe with failure modes: `docs/ADOPTION.md §2`.
 
+**Composite pattern with llmfit — model selection + contract gate:**
+
+[llmfit](https://github.com/AlexsJones/llmfit) (37k★, Rust, MIT) selects models from a
+database of 100+ known models; fitsproof-rs enforces the contract on the GGUF you actually have.
+They address different problems; running both takes < 1 s total:
+
+```bash
+# Step 0: llmfit picks the right model family for your hardware (database-driven)
+MODEL=$(llmfit recommend --use-case coding --json | jq -r '.models[0].path')
+
+# Step 1: fitsproof enforces the contract on that specific GGUF (< 50 ms, no engine)
+fitsproof admit \
+  --model "$MODEL" \
+  --quant q4_k_m \
+  --context 4096 \
+  --budget-gb 13.6 \       # 85% of 16 GB RAM — absorbs OS and K-quant overhead
+|| { echo "REFUSED: see binding constraint above"; exit 2; }
+
+# Step 2: your engine — only reached if both steps pass
+llama-cli -m "$MODEL" -c 4096 -n 200 -p "Your prompt"
+```
+
+llmfit handles model discovery; fitsproof-rs provides the exit-2 contract gate that llmfit
+does not emit. See `docs/ADOPTION.md §14` for the full composite workflow with failure modes.
+
 **Stress your configuration space:**
 ```bash
 fitsproof stress  # fails the build on any violation; safe to run in CI
@@ -239,13 +264,15 @@ src/
 tests/
   smoke.rs           Binary smoke tests (version, unknown command)
   stress.rs          25-config stress harness (acceptance criteria)
-  adversarial.rs     48 byzantine/edge-case tests (overflow, malformed input, boundary faults,
+  adversarial.rs     58 byzantine/edge-case tests (overflow, malformed input, boundary faults,
                      race condition close, FitsproofClient API attacks)
-  cmd_integration.rs 44 CLI integration tests (subcommand flags, error messages, exit codes)
-  contract_mutants.rs  33 mutation-killing tests targeting cost/plan/admit arithmetic
+  cmd_integration.rs 54 CLI integration tests (subcommand flags, error messages, exit codes)
+  contract_mutants.rs  46 mutation-killing tests targeting cost/plan/admit arithmetic
   real_model.rs      Real GGUF model test (plan against real weights)
   value/
     test_incumbent_gap.rs  The two mandatory zero-case proofs (refused + degraded)
+src/
+  main.rs (bin)      15 unit tests for parse_budget_gb and count_violations_and_changes
 ```
 
 ## CLI reference

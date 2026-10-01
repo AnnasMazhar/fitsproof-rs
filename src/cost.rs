@@ -378,6 +378,51 @@ mod tests {
         );
     }
 
+    /// Fault detected: any arithmetic error in the fp16 model weight_bytes formula —
+    /// e.g. replacing `*` with `+` in attn_per_layer or ffn_per_layer for fp16 models.
+    ///
+    /// The only existing fp16 coverage (`quant_bits_bytes_per_element_exact_values` in
+    /// contract_mutants.rs) asserts bounds only: `fp16 < fp32` and `fp16 > 1_574_400`.
+    /// These bounds are too loose: a mutation changing `*` to `+` in the attn formula
+    /// (producing ~393,218 instead of ~786,432 attn bytes) would drop total from
+    /// 26,758,656 to ~24,372,224 — still within those loose bounds and thus UNDETECTED.
+    ///
+    /// Hand-computed for reference config (6L, 384H, 6Q-heads, 2KV-heads, 64 hd, 1536 ff, 512V)
+    /// at float16 (2 bytes/element for transformer layers; fp16 = 2 bytes for embed/unembed):
+    ///
+    ///   embed            = 512 * 384 * 2                    =    393_216  (fp16)
+    ///   attn Q/layer     = 6 * 64 * 384 * 2                =    589_824
+    ///   attn K/layer     = 2 * 64 * 384 * 2                =    196_608
+    ///   attn V/layer     = 2 * 64 * 384 * 2                =    196_608
+    ///   attn O/layer     = 384 * 6 * 64 * 2                =    589_824
+    ///   attn/layer total                                    =    786_432
+    ///   ffn gate/layer   = 1536 * 384 * 2                  =  1_179_648
+    ///   ffn up/layer     = 1536 * 384 * 2                  =  1_179_648
+    ///   ffn down/layer   = 384 * 1536 * 2                  =  1_179_648
+    ///   ffn/layer total                                     =  3_538_944
+    ///   norm/layer       = 2 * 384 * 4                     =      3_072  (fp32 — unchanged)
+    ///   per-layer total  = 786_432 + 3_538_944 + 3_072     =  4_328_448
+    ///   6 layers         = 6 * 4_328_448                   = 25_970_688
+    ///   final norm       = 384 * 4                         =      1_536  (fp32 — unchanged)
+    ///   unembed          = 512 * 384 * 2                   =    393_216  (fp16 — same as embed)
+    ///   total = 393_216 + 25_970_688 + 1_536 + 393_216     = 26_758_656
+    ///
+    /// Source: cost.rs formula traced term by term; fp16 embed/unembed from GGUF convention
+    /// (RESEARCH.md §1933; llama.cpp src/llama-model-loader.cpp).
+    #[test]
+    fn weight_bytes_fp16_exact_known_answer() {
+        let cfg = ref_cfg();
+        let got = weight_bytes(&cfg, "float16");
+        let expected: u64 = 26_758_656;
+        assert_eq!(
+            got, expected,
+            "weight_bytes float16 got {got}, expected {expected}. \
+             Derivation: embed(393216) + 6×layer(4328448) + final(394752) = 26758656. \
+             If got ~24372224, attn *→+ mutation is present. \
+             If got ~393218, all layer * were replaced with +."
+        );
+    }
+
     /// Fault detected: embed and unembed use fp32 (4 bytes) instead of fp16 (2 bytes)
     /// for quantised models, overcounting by ~2 GB for 7B-class models.
     ///
