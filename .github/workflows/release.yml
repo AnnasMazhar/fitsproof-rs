@@ -1,0 +1,108 @@
+name: Release
+
+# Trigger on version tags: v0.1.0, v0.2.0, etc.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Build static musl binary ──────────────────────────────────────────────
+  build-musl:
+    name: Build static binary (x86_64-musl)
+    runs-on: ubuntu-latest
+    outputs:
+      sha256: ${{ steps.sha.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add musl target
+        run: rustup target add x86_64-unknown-linux-musl
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Verify static link + record SHA256
+        id: sha
+        run: |
+          set -eu
+          BIN=target/x86_64-unknown-linux-musl/release/fitsproof
+          # Confirm statically linked
+          file "$BIN"
+          if ldd "$BIN" 2>&1 | grep -q "=>"; then
+            echo "FAIL: binary links dynamic libraries"; exit 1
+          fi
+          echo "ldd: $(ldd "$BIN" 2>&1 || true)"
+          # Record SHA256
+          SHA=$(sha256sum "$BIN" | cut -d' ' -f1)
+          echo "SHA256: $SHA"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          sha256sum "$BIN" > fitsproof-x86_64-linux-musl.sha256
+          # Smoke test
+          "$BIN" --version
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fitsproof-x86_64-linux-musl
+          path: |
+            target/x86_64-unknown-linux-musl/release/fitsproof
+            fitsproof-x86_64-linux-musl.sha256
+
+  # ── Full test suite must pass before release ─────────────────────────────
+  test:
+    name: Test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: internal-reference guard
+        run: bash scripts/check_no_internal_refs.sh
+      - name: test
+        run: cargo test --all-targets --all-features
+
+  # ── GitHub Release with binary attached ──────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: [build-musl, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fitsproof-x86_64-linux-musl
+          path: dist/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: |
+            ## fitsproof-rs ${{ github.ref_name }}
+
+            Single static binary for x86_64 Linux (musl, no dynamic libraries).
+
+            **SHA256:** `${{ needs.build-musl.outputs.sha256 }}`
+
+            ```bash
+            # Verify before running
+            sha256sum -c fitsproof-x86_64-linux-musl.sha256
+            chmod +x fitsproof
+            ./fitsproof --version
+            ```
+
+            See [EVIDENCE.md](docs/EVIDENCE.md) for the stress-harness results and contract proofs.
+          files: |
+            dist/fitsproof
+            dist/fitsproof-x86_64-linux-musl.sha256
+          fail_on_unmatched_files: true

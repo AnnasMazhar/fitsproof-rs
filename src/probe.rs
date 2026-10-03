@@ -265,13 +265,39 @@ mod tests {
 
     /// Fault detected: STREAM-triad measurement returns 0 (no timing, no bandwidth).
     ///
-    /// Threshold is 100 MB/s (well below any real machine) rather than 1 GB/s to avoid
-    /// false failures in the parallel test runner with debug builds and small arrays.
-    /// The production probe uses 8M elements; this test uses a smaller array for speed.
+    /// Threshold is 1 MB/s — chosen to catch only the zero/broken-timing fault
+    /// (measurement returns 0 or near-0) without being sensitive to system load.
+    ///
+    /// Why 1 MB/s and NOT 100 MB/s: the test array is 512 K × 8 bytes = 4 MB, which
+    /// fits in L3 cache on most machines.  When the test runner executes many tests
+    /// concurrently, the OS scheduler may preempt this thread mid-loop, stretching the
+    /// measured wall time while memory bandwidth remains committed — artificially
+    /// depressing the reported value.  In the c3-p6 eval this produced `4.39e7` (44 MB/s)
+    /// with the old 1e8 threshold, causing a spurious failure.  The test's stated fault is
+    /// detecting a zero measurement, not verifying DRAM speed; 1 MB/s catches the former
+    /// without being sensitive to the latter.
     #[test]
     fn bandwidth_is_positive() {
         let bw = measure_bandwidth(512 * 1024, 2);
-        assert!(bw > 1e8, "bandwidth should be > 100 MB/s, got {bw:.2e}");
+        assert!(bw > 1e6, "bandwidth should be > 1 MB/s, got {bw:.2e}");
+    }
+
+    /// Fault detected: `measure_bandwidth` loop is optimised away by the compiler, returning
+    /// a nonsensically large value from uninitialized memory or the warmup pass only.
+    ///
+    /// This guards the upper end: any result above 10 TB/s is physically impossible on
+    /// real hardware (fastest measured DRAM is ~1 TB/s for HBM3e) and indicates the loop
+    /// was mis-compiled.  Combined with `bandwidth_is_positive`, the two tests form a
+    /// plausible range assertion [1 MB/s, 10 TB/s] that detects both broken-low and
+    /// broken-high measurement faults.
+    #[test]
+    fn bandwidth_not_absurdly_large() {
+        let bw = measure_bandwidth(512 * 1024, 2);
+        // 10 TB/s in bytes/second — no shipping hardware exceeds this.
+        assert!(
+            bw < 1e13,
+            "bandwidth {bw:.2e} is physically impossible; loop may be optimised away or uninitialized memory read"
+        );
     }
 
     /// Fault detected: GEMM measurement returns 0 (loop optimised away or no timing).

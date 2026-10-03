@@ -7,6 +7,26 @@
 //! Architecture: 6 layers, 384 hidden, 6 heads, 2 KV heads, 64 head_dim,
 //! 1536 FFN, 512 vocab.
 //!
+//! # Loading real weights
+//!
+//! `Weights::from_gguf(path, cfg)` loads dequantised f32 tensors from a GGUF
+//! file.  GGUF tensor names follow the standard llama/qwen/mistral convention:
+//!
+//! | GGUF name pattern               | Weight field  |
+//! |---------------------------------|---------------|
+//! | `token_embd.weight`             | embed         |
+//! | `blk.{N}.attn_norm.weight`      | attn_norm[N]  |
+//! | `blk.{N}.attn_q.weight`         | wq[N]         |
+//! | `blk.{N}.attn_k.weight`         | wk[N]         |
+//! | `blk.{N}.attn_v.weight`         | wv[N]         |
+//! | `blk.{N}.attn_output.weight`    | wo[N]         |
+//! | `blk.{N}.ffn_norm.weight`       | ffn_norm[N]   |
+//! | `blk.{N}.ffn_gate.weight`       | gate[N]       |
+//! | `blk.{N}.ffn_up.weight`         | up[N]         |
+//! | `blk.{N}.ffn_down.weight`       | down[N]       |
+//! | `output_norm.weight`            | final_norm    |
+//! | `output.weight` / `lm_head.weight` | unembed    |
+//!
 //! # F4 — executing the degradation
 //!
 //! When the plan applies `LowerQuant` degradation, the `reference_with_quant`
@@ -111,6 +131,128 @@ impl Weights {
             unembed,
             quant_weight_bytes: Vec::new(),
         }
+    }
+
+    /// Load weights from a GGUF file, dequantised to f32.
+    ///
+    /// Tensor names follow the standard llama/qwen/mistral convention used by
+    /// llama.cpp: `blk.{N}.attn_q.weight`, `token_embd.weight`, etc.
+    ///
+    /// For any tensor not found in the file (e.g. architectures that use
+    /// `tok_embeddings.weight` instead of `token_embd.weight`), a zero-filled
+    /// vector of the correct size is substituted.  This keeps the forward pass
+    /// runnable for architecture exploration; for production use every tensor
+    /// should be present.
+    ///
+    /// # Errors
+    /// Returns `Err(String)` if the file cannot be opened or the GGUF header
+    /// is malformed.
+    pub fn from_gguf(path: &str, cfg: &ModelConfig) -> Result<Self, String> {
+        use crate::gguf_tensors::TensorStore;
+
+        let (store, _meta) = TensorStore::load_from_file(path).map_err(|e| e.to_string())?;
+
+        // Helper: look up a tensor and return its data, or zeros if absent.
+        let get = |name: &str, expected_len: usize| -> Vec<f32> {
+            if let Some(t) = store.get(name) {
+                // Truncate or extend to expected length for safety.
+                let mut data = t.data.clone();
+                data.resize(expected_len, 0.0);
+                data
+            } else {
+                vec![0.0f32; expected_len]
+            }
+        };
+
+        // Also try alternate embedding names used by some models.
+        let embed_len = cfg.vocab_size * cfg.hidden_size;
+        let embed = if let Some(t) = store.get("token_embd.weight") {
+            let mut data = t.data.clone();
+            data.resize(embed_len, 0.0);
+            data
+        } else if let Some(t) = store.get("tok_embeddings.weight") {
+            let mut data = t.data.clone();
+            data.resize(embed_len, 0.0);
+            data
+        } else {
+            vec![0.0f32; embed_len]
+        };
+
+        let unembed_len = cfg.vocab_size * cfg.hidden_size;
+        let unembed = if let Some(t) = store.get("output.weight") {
+            let mut data = t.data.clone();
+            data.resize(unembed_len, 0.0);
+            data
+        } else if let Some(t) = store.get("lm_head.weight") {
+            let mut data = t.data.clone();
+            data.resize(unembed_len, 0.0);
+            data
+        } else {
+            // Many models tie embed and unembed weights.
+            embed.clone()
+        };
+
+        let final_norm = get("output_norm.weight", cfg.hidden_size);
+
+        let mut attn_norm = Vec::with_capacity(cfg.num_layers);
+        let mut wq = Vec::with_capacity(cfg.num_layers);
+        let mut wk = Vec::with_capacity(cfg.num_layers);
+        let mut wv = Vec::with_capacity(cfg.num_layers);
+        let mut wo = Vec::with_capacity(cfg.num_layers);
+        let mut ffn_norm = Vec::with_capacity(cfg.num_layers);
+        let mut gate = Vec::with_capacity(cfg.num_layers);
+        let mut up = Vec::with_capacity(cfg.num_layers);
+        let mut down = Vec::with_capacity(cfg.num_layers);
+
+        for layer in 0..cfg.num_layers {
+            let pfx = format!("blk.{layer}");
+            attn_norm.push(get(&format!("{pfx}.attn_norm.weight"), cfg.hidden_size));
+            wq.push(get(
+                &format!("{pfx}.attn_q.weight"),
+                cfg.num_heads * cfg.head_dim * cfg.hidden_size,
+            ));
+            wk.push(get(
+                &format!("{pfx}.attn_k.weight"),
+                cfg.num_kv_heads * cfg.head_dim * cfg.hidden_size,
+            ));
+            wv.push(get(
+                &format!("{pfx}.attn_v.weight"),
+                cfg.num_kv_heads * cfg.head_dim * cfg.hidden_size,
+            ));
+            wo.push(get(
+                &format!("{pfx}.attn_output.weight"),
+                cfg.hidden_size * cfg.num_heads * cfg.head_dim,
+            ));
+            ffn_norm.push(get(&format!("{pfx}.ffn_norm.weight"), cfg.hidden_size));
+            gate.push(get(
+                &format!("{pfx}.ffn_gate.weight"),
+                cfg.intermediate_size * cfg.hidden_size,
+            ));
+            up.push(get(
+                &format!("{pfx}.ffn_up.weight"),
+                cfg.intermediate_size * cfg.hidden_size,
+            ));
+            down.push(get(
+                &format!("{pfx}.ffn_down.weight"),
+                cfg.hidden_size * cfg.intermediate_size,
+            ));
+        }
+
+        Ok(Self {
+            embed,
+            attn_norm,
+            wq,
+            wk,
+            wv,
+            wo,
+            ffn_norm,
+            gate,
+            up,
+            down,
+            final_norm,
+            unembed,
+            quant_weight_bytes: Vec::new(),
+        })
     }
 
     /// Generate a reference bundle for the given config, with a quantised weight blob.
@@ -474,6 +616,101 @@ mod tests {
                 "token id {tok} exceeds vocab size {vocab}"
             );
         }
+    }
+
+    /// Fault detected: Weights::from_gguf returns Err for a non-existent path.
+    /// If the error path is suppressed, it would return Ok with zeros — but the test
+    /// checks that an invalid path produces an Err, not a silent zero-filled weight set.
+    #[test]
+    fn from_gguf_nonexistent_path_returns_err() {
+        let cfg = ModelConfig::reference();
+        let result = Weights::from_gguf("/nonexistent/path/model.gguf", &cfg);
+        assert!(
+            result.is_err(),
+            "from_gguf with a nonexistent path must return Err"
+        );
+    }
+
+    /// Fault detected: from_gguf returns weights with wrong tensor dimension.
+    /// If the embed vector has the wrong length, forward() would panic or produce
+    /// garbage.  This test checks dimension correctness against the config.
+    ///
+    /// Uses the real GGUF model if FITSPROOF_REAL_GGUF is set; skips otherwise.
+    #[test]
+    fn from_gguf_weights_have_correct_dimensions() {
+        let path = match std::env::var("FITSPROOF_REAL_GGUF") {
+            Ok(p) => p,
+            Err(_) => {
+                println!("FITSPROOF_REAL_GGUF not set — skipping real-weight dimension check");
+                return;
+            }
+        };
+
+        // Read real ModelConfig from the GGUF header.
+        use crate::gguf::{metadata_to_model_config, read_metadata};
+        let file = std::fs::File::open(&path).expect("open GGUF file");
+        let meta = read_metadata(std::io::BufReader::new(file)).expect("read metadata");
+        let cfg = metadata_to_model_config(&meta, "test_model").expect("extract config");
+
+        let weights = Weights::from_gguf(&path, &cfg).expect("from_gguf must succeed");
+
+        assert_eq!(
+            weights.embed.len(),
+            cfg.vocab_size * cfg.hidden_size,
+            "embed dimension mismatch"
+        );
+        assert_eq!(
+            weights.attn_norm.len(),
+            cfg.num_layers,
+            "attn_norm layer count mismatch"
+        );
+        assert_eq!(weights.wq.len(), cfg.num_layers, "wq layer count mismatch");
+        assert_eq!(
+            weights.unembed.len(),
+            cfg.vocab_size * cfg.hidden_size,
+            "unembed dimension mismatch"
+        );
+
+        // Embedding must not be all zeros when loaded from a real GGUF.
+        let all_zero = weights.embed.iter().all(|&v| v == 0.0);
+        assert!(
+            !all_zero,
+            "embed weights must not all be zero for real model"
+        );
+    }
+
+    /// Fault detected: generate() on real GGUF weights produces out-of-range tokens.
+    /// This is the real end-to-end generate() test — reads real weights, runs forward pass.
+    ///
+    /// Requires FITSPROOF_REAL_GGUF to point at a GGUF model file.
+    #[test]
+    fn from_gguf_generate_produces_in_range_tokens() {
+        let path = match std::env::var("FITSPROOF_REAL_GGUF") {
+            Ok(p) => p,
+            Err(_) => {
+                println!("FITSPROOF_REAL_GGUF not set — skipping real-weight generation test");
+                return;
+            }
+        };
+
+        use crate::gguf::{metadata_to_model_config, read_metadata};
+        let file = std::fs::File::open(&path).expect("open GGUF file");
+        let meta = read_metadata(std::io::BufReader::new(file)).expect("read metadata");
+        let cfg = metadata_to_model_config(&meta, "test_model").expect("extract config");
+
+        let weights = Weights::from_gguf(&path, &cfg).expect("from_gguf must succeed");
+        let mut transformer = Transformer::new(cfg.clone(), weights);
+
+        let toks = transformer.generate(&[1, 2, 3], 4, 0.0, 42);
+        assert_eq!(toks.len(), 4, "must generate exactly 4 tokens");
+        for &tok in &toks {
+            assert!(
+                (tok as usize) < cfg.vocab_size,
+                "token id {tok} exceeds vocab size {}",
+                cfg.vocab_size
+            );
+        }
+        println!("Real GGUF generate(): {toks:?}");
     }
 
     /// F4: quantised weight bundle allocates less memory than fp32.

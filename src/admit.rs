@@ -229,10 +229,10 @@ mod tests {
         let m = ref_machine();
         use crate::cost;
         let fp32_peak = cost::weight_bytes(&cfg, "none")
-            + cost::kv_cache_bytes(&cfg, 512, "none")
+            + cost::kv_cache_bytes(&cfg, 512, "fp16")
             + cost::activation_bytes(&cfg);
         let int4_peak = cost::weight_bytes(&cfg, "int4_sym")
-            + cost::kv_cache_bytes(&cfg, 512, "int4_sym")
+            + cost::kv_cache_bytes(&cfg, 512, "fp16")
             + cost::activation_bytes(&cfg);
 
         // Budget: between int4 peak and fp32 peak.

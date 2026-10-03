@@ -18,13 +18,18 @@
 //!    never a silent OOM kill.
 //! 3. A freed-then-reallocated pattern does not falsely trip the ceiling — `current_bytes`
 //!    is decremented on dealloc before the next alloc is measured.
+//! 4. **The ceiling check and increment are atomic** — `try_reserve` uses a CAS loop so
+//!    that two concurrent threads cannot both pass the ceiling check and combine to exceed
+//!    it (the TOCTOU race documented as ADV-3 in adversarial.rs, now fixed).
 //!
 //! # Research provenance
 //!
 //! Allocator hook pattern: standard Rust `GlobalAlloc` API
 //! (https://doc.rust-lang.org/std/alloc/trait.GlobalAlloc.html).
-//! Atomic ordering: Seqcst used for correctness; relaxed load in `current_bytes()` for
+//! Atomic ordering: SeqCst used for correctness; relaxed load in `peak_bytes()` for
 //! read-only queries (safe because the value is monotone for peak).
+//! CAS loop for atomic reserve: standard compare-exchange retry pattern for lock-free
+//! bounded counters (see Herlihy & Shavit, "The Art of Multiprocessor Programming", §5).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::fmt;
@@ -130,12 +135,15 @@ impl TrackingAllocator {
     /// Check whether allocating `size` bytes would exceed the ceiling.
     ///
     /// Returns `Ok(())` if fine, `Err(DoesNotFit)` if it would exceed.
+    ///
+    /// This is a point-in-time advisory check. For atomic ceiling enforcement
+    /// use `GlobalAlloc::alloc` / `try_reserve` which use a CAS loop.
     pub fn check(&self, size: usize) -> Result<(), DoesNotFit> {
         let ceil = self.ceiling.load(Ordering::SeqCst);
         if ceil == 0 {
             return Ok(());
         }
-        let current = self.current_bytes();
+        let current = self.current.load(Ordering::SeqCst).max(0) as u64;
         let after = current.saturating_add(size as u64);
         if after > ceil {
             Err(DoesNotFit {
@@ -149,6 +157,52 @@ impl TrackingAllocator {
             })
         } else {
             Ok(())
+        }
+    }
+
+    /// Atomically reserve `size` bytes against the ceiling using a compare-exchange loop.
+    ///
+    /// The plain `check()` method has a TOCTOU window — two threads can both pass
+    /// the check before either updates `current`. This method closes the race by
+    /// atomically incrementing `current` only when the result would not exceed the
+    /// ceiling, using a CAS loop on the signed `current` counter.
+    ///
+    /// Returns the new `current` value on success so the caller can update `peak`,
+    /// or `Err(DoesNotFit)` if the ceiling would be exceeded.
+    fn try_reserve(&self, size: usize) -> Result<u64, DoesNotFit> {
+        let ceil = self.ceiling.load(Ordering::SeqCst);
+        if ceil == 0 {
+            // No ceiling — unconditionally increment.
+            let prev = self.current.fetch_add(size as i64, Ordering::SeqCst);
+            return Ok((prev + size as i64).max(0) as u64);
+        }
+        let size_i = size as i64;
+        // CAS loop: read current, check, increment atomically.
+        let mut current = self.current.load(Ordering::SeqCst);
+        loop {
+            let after = current.saturating_add(size_i);
+            if after as u64 > ceil {
+                return Err(DoesNotFit {
+                    binding_constraint: format!(
+                        "allocation of {} B would push usage ({} B) past ceiling ({} B)",
+                        size,
+                        current.max(0) as u64,
+                        ceil
+                    ),
+                    ceiling_bytes: ceil,
+                    requested_bytes: size,
+                    current_bytes: current.max(0) as u64,
+                });
+            }
+            match self.current.compare_exchange_weak(
+                current,
+                after,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return Ok(after.max(0) as u64),
+                Err(observed) => current = observed,
+            }
         }
     }
 
@@ -189,30 +243,26 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let size = layout.size();
 
-        // Check ceiling before allocating.
-        let ceil = self.ceiling.load(Ordering::SeqCst);
-        if ceil > 0 {
-            let current = self.current.load(Ordering::SeqCst).max(0) as u64;
-            if current.saturating_add(size as u64) > ceil {
-                // Return null — Rust will call handle_alloc_error which panics,
-                // but callers using try_alloc patterns or Box::try_new will see the null.
-                // For the contract enforcement path, callers must use check() before
-                // allocating to get the typed DoesNotFit error.
-                return std::ptr::null_mut();
-            }
-        }
+        // Atomically reserve bytes against the ceiling (closes the TOCTOU race).
+        // If the ceiling would be exceeded, refuse immediately without calling the
+        // underlying allocator.
+        let new_current = match self.try_reserve(size) {
+            Ok(v) => v,
+            Err(_) => return std::ptr::null_mut(),
+        };
 
         let ptr = self.inner.alloc(layout);
-        if !ptr.is_null() {
-            self.current.fetch_add(size as i64, Ordering::SeqCst);
+        if ptr.is_null() {
+            // Underlying allocator failed; undo the reservation.
+            self.current.fetch_sub(size as i64, Ordering::SeqCst);
+        } else {
             self.count.fetch_add(1, Ordering::SeqCst);
-            // Update peak: spin until we either own the update or observe a >= value.
-            let current_after = self.current.load(Ordering::SeqCst).max(0) as u64;
+            // Update peak with the value we already computed atomically.
             let mut peak = self.peak.load(Ordering::Relaxed);
-            while current_after > peak {
+            while new_current > peak {
                 match self.peak.compare_exchange_weak(
                     peak,
-                    current_after,
+                    new_current,
                     Ordering::SeqCst,
                     Ordering::Relaxed,
                 ) {
@@ -233,24 +283,21 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         let size = layout.size();
 
-        let ceil = self.ceiling.load(Ordering::SeqCst);
-        if ceil > 0 {
-            let current = self.current.load(Ordering::SeqCst).max(0) as u64;
-            if current.saturating_add(size as u64) > ceil {
-                return std::ptr::null_mut();
-            }
-        }
+        let new_current = match self.try_reserve(size) {
+            Ok(v) => v,
+            Err(_) => return std::ptr::null_mut(),
+        };
 
         let ptr = self.inner.alloc_zeroed(layout);
-        if !ptr.is_null() {
-            self.current.fetch_add(size as i64, Ordering::SeqCst);
+        if ptr.is_null() {
+            self.current.fetch_sub(size as i64, Ordering::SeqCst);
+        } else {
             self.count.fetch_add(1, Ordering::SeqCst);
-            let current_after = self.current.load(Ordering::SeqCst).max(0) as u64;
             let mut peak = self.peak.load(Ordering::Relaxed);
-            while current_after > peak {
+            while new_current > peak {
                 match self.peak.compare_exchange_weak(
                     peak,
-                    current_after,
+                    new_current,
                     Ordering::SeqCst,
                     Ordering::Relaxed,
                 ) {
@@ -265,29 +312,36 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let old_size = layout.size();
 
-        // If growing, check ceiling for the delta.
-        if new_size > old_size {
+        // If growing, atomically reserve the delta against the ceiling.
+        let new_current_opt = if new_size > old_size {
             let delta = new_size - old_size;
-            let ceil = self.ceiling.load(Ordering::SeqCst);
-            if ceil > 0 {
-                let current = self.current.load(Ordering::SeqCst).max(0) as u64;
-                if current.saturating_add(delta as u64) > ceil {
-                    return std::ptr::null_mut();
-                }
+            match self.try_reserve(delta) {
+                Ok(v) => Some(v),
+                Err(_) => return std::ptr::null_mut(),
             }
-        }
+        } else {
+            None
+        };
 
         let new_ptr = self.inner.realloc(ptr, layout, new_size);
-        if !new_ptr.is_null() {
-            let delta = new_size as i64 - old_size as i64;
-            self.current.fetch_add(delta, Ordering::SeqCst);
+        if new_ptr.is_null() {
+            // Undo the reservation if we made one.
             if new_size > old_size {
-                let current_after = self.current.load(Ordering::SeqCst).max(0) as u64;
+                self.current
+                    .fetch_sub((new_size - old_size) as i64, Ordering::SeqCst);
+            }
+        } else {
+            if new_size <= old_size {
+                // Shrink — adjust current downward (no ceiling check needed).
+                self.current
+                    .fetch_sub((old_size - new_size) as i64, Ordering::SeqCst);
+            }
+            if let Some(new_current) = new_current_opt {
                 let mut peak = self.peak.load(Ordering::Relaxed);
-                while current_after > peak {
+                while new_current > peak {
                     match self.peak.compare_exchange_weak(
                         peak,
-                        current_after,
+                        new_current,
                         Ordering::SeqCst,
                         Ordering::Relaxed,
                     ) {

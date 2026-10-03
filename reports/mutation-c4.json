@@ -1,0 +1,22 @@
+{
+  "cycle": 4,
+  "tool": "cargo-mutants",
+  "command": "~/.cargo/bin/cargo mutants --no-times --no-shuffle",
+  "rc": 124,
+  "killed": 1,
+  "total": 3,
+  "unviable": 1,
+  "kill_rate": 0.3333333333333333,
+  "score_raw": "1/3",
+  "target": 0.7,
+  "tail": [
+    "Found 1255 mutants to test",
+    "ok       Unmutated baseline",
+    "MISSED   src/main.rs:83:34: replace * with + in cmd_probe",
+    "MISSED   src/main.rs:83:34: replace * with / in cmd_probe",
+    "MISSED   src/main.rs:83:27: replace * with + in cmd_probe",
+    "",
+    "TIMEOUT after 3600s \u2014 process group killed"
+  ],
+  "generated_at": 1790703040.836775
+}

@@ -7,6 +7,8 @@ description = "fitsproof, compiled: enforce an LLM memory budget with a byte-cou
 license = "MIT"
 repository = "https://github.com/AnnasMazhar/fitsproof-rs"
 readme = "README.md"
+keywords = ["llm", "memory", "inference", "gguf", "oom"]
+categories = ["command-line-utilities", "development-tools::testing", "memory-management"]
 
 [[bin]]
 name = "fitsproof"
@@ -21,8 +23,22 @@ path = "src/lib.rs"
 serde = { version = "1.0.210", features = ["derive"] }
 serde_json = "1.0.128"
 
+[[test]]
+name = "test_incumbent_gap"
+path = "tests/value/test_incumbent_gap.rs"
+
+[[test]]
+name = "adversarial"
+path = "tests/adversarial.rs"
+
+[[test]]
+name = "contract_mutants"
+path = "tests/contract_mutants.rs"
+
 [dev-dependencies]
-# No network at test time — only dev deps used in tests
+# Property-based testing (Hypothesis analogue for Rust).
+# Properties come from the method's assumptions, not the implementation.
+proptest = "1.4.0"
 
 [profile.release]
 lto = true

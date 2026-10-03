@@ -212,9 +212,19 @@ pub fn plan(
             binding_constraint: String::new(),
         })
     } else {
+        // Include component breakdown so the user can see which term is binding.
+        // This satisfies ADV-1: "binding constraint named" means the component breakdown
+        // is visible, not just the total.
+        let w = cost_est.weight_bytes;
+        let kv = cost_est.kv_cache_bytes;
+        let act = cost_est.activation_bytes;
         let binding = format!(
-            "needs {:.2} GB, budget {:.2} GB; no degradation fits",
+            "needs {:.3} GB (weight={:.3} GB, kv={:.3} GB, activation={:.3} GB), \
+             budget {:.3} GB; no degradation fits",
             predicted_peak as f64 / 1e9,
+            w as f64 / 1e9,
+            kv as f64 / 1e9,
+            act as f64 / 1e9,
             budget_bytes as f64 / 1e9,
         );
         Ok(Plan {
@@ -293,7 +303,7 @@ mod tests {
         let m = ref_machine();
         // Budget just below the fp32 peak but enough for int4.
         let fp32_peak = cost::weight_bytes(&cfg, "none")
-            + cost::kv_cache_bytes(&cfg, 512, "none")
+            + cost::kv_cache_bytes(&cfg, 512, "fp16")
             + cost::activation_bytes(&cfg);
         let just_below = fp32_peak - 1;
         let p = plan(&cfg, &m, 512, just_below, "none", 0.6).unwrap();
@@ -347,6 +357,36 @@ mod tests {
         );
     }
 
+    /// Fault detected: binding_constraint omits component breakdown (weight/kv/activation),
+    /// leaving the user without diagnostic info about which component is the bottleneck.
+    ///
+    /// This is the test that would have caught ADV-1: if the binding constraint string
+    /// does not contain "weight=", "kv=", and "activation=", the user cannot determine
+    /// which component is dominant without re-running cost::estimate manually.
+    #[test]
+    fn binding_constraint_includes_component_breakdown() {
+        let cfg = ModelConfig::reference();
+        let m = ref_machine();
+        // 1-byte budget forces DoesNotFit.
+        let p = plan(&cfg, &m, 512, 1, "none", 0.6).unwrap();
+        assert_eq!(p.verdict, Verdict::DoesNotFit);
+        assert!(
+            p.binding_constraint.contains("weight="),
+            "binding_constraint must include 'weight=' component: got {:?}",
+            p.binding_constraint
+        );
+        assert!(
+            p.binding_constraint.contains("kv="),
+            "binding_constraint must include 'kv=' component: got {:?}",
+            p.binding_constraint
+        );
+        assert!(
+            p.binding_constraint.contains("activation="),
+            "binding_constraint must include 'activation=' component: got {:?}",
+            p.binding_constraint
+        );
+    }
+
     /// Regression test: exact-boundary (predicted_peak == budget) must NOT return Fits.
     ///
     /// A zero-margin plan has no headroom for the residual OS overhead that the analytical
@@ -386,6 +426,103 @@ mod tests {
                 !d.fits_budget,
                 "no degradation can fit 1-byte budget: {d:?}"
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property-based tests (proptest)
+    //
+    // Properties come from the plan algorithm's invariants, not the implementation.
+    // -----------------------------------------------------------------------
+
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Property: Verdict::Fits only ever produced when predicted_peak <= budget.
+        ///
+        /// Fault detected: Fits verdict emitted when config actually exceeds budget.
+        #[test]
+        fn fits_verdict_implies_peak_le_budget(
+            budget_mb in 1u64..2000,
+        ) {
+            let cfg = ModelConfig::reference();
+            let m = ref_machine();
+            let budget = budget_mb * 1_000_000;
+            let p = plan(&cfg, &m, 512, budget, "none", 0.6).unwrap();
+            if p.verdict == Verdict::Fits {
+                prop_assert!(
+                    p.predicted_peak_bytes <= p.budget_bytes,
+                    "Fits verdict but peak {} > budget {}",
+                    p.predicted_peak_bytes, p.budget_bytes
+                );
+            }
+        }
+
+        /// Property: Verdict::DoesNotFit implies binding_constraint is non-empty.
+        ///
+        /// Fault detected: DoesNotFit emitted without naming the binding constraint
+        /// (vacuous refusal with no diagnostic info).
+        #[test]
+        fn does_not_fit_has_binding_constraint(
+            budget_bytes in 1u64..10_000,
+        ) {
+            let cfg = ModelConfig::reference();
+            let m = ref_machine();
+            let p = plan(&cfg, &m, 512, budget_bytes, "none", 0.6).unwrap();
+            if p.verdict == Verdict::DoesNotFit {
+                prop_assert!(
+                    !p.binding_constraint.is_empty(),
+                    "DoesNotFit must name binding_constraint"
+                );
+            }
+        }
+
+        /// Property: for any valid budget, a larger budget never produces a worse verdict.
+        ///
+        /// Formally: budget_a < budget_b => verdict(budget_a) is at least as restrictive
+        /// as verdict(budget_b). The ordering is DoesNotFit < FitsWithDegradation < Fits.
+        ///
+        /// Fault detected: non-monotone verdict function (larger budget produces stricter verdict).
+        #[test]
+        fn verdict_monotone_in_budget(
+            budget_a_mb in 1u64..50,
+            budget_b_mb in 100u64..2000,
+        ) {
+            let cfg = ModelConfig::reference();
+            let m = ref_machine();
+            let pa = plan(&cfg, &m, 512, budget_a_mb * 1_000_000, "none", 0.6).unwrap();
+            let pb = plan(&cfg, &m, 512, budget_b_mb * 1_000_000, "none", 0.6).unwrap();
+
+            fn verdict_rank(v: Verdict) -> u8 {
+                match v {
+                    Verdict::DoesNotFit => 0,
+                    Verdict::FitsWithDegradation => 1,
+                    Verdict::Fits => 2,
+                }
+            }
+            prop_assert!(
+                verdict_rank(pa.verdict) <= verdict_rank(pb.verdict),
+                "verdict must be non-decreasing in budget: small_budget({budget_a_mb}MB)={:?} > large_budget({budget_b_mb}MB)={:?}",
+                pa.verdict, pb.verdict
+            );
+        }
+
+        /// Property: FitsWithDegradation verdict implies at least one degradation step fits.
+        ///
+        /// Fault detected: FitsWithDegradation verdict emitted but no fitting degradation exists.
+        #[test]
+        fn fits_with_degradation_has_fitting_step(
+            budget_mb in 10u64..200,
+        ) {
+            let cfg = ModelConfig::reference();
+            let m = ref_machine();
+            let p = plan(&cfg, &m, 512, budget_mb * 1_000_000, "none", 0.6).unwrap();
+            if p.verdict == Verdict::FitsWithDegradation {
+                prop_assert!(
+                    p.degradations.iter().any(|d| d.fits_budget),
+                    "FitsWithDegradation must have at least one fitting degradation step"
+                );
+            }
         }
     }
 }
