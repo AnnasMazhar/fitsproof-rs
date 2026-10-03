@@ -3749,7 +3749,7 @@ gating, pre-flight script checks, and offline portable verification.
 
 **Link:** https://github.com/signerless/llm-checker  
 **Stars:** 3,000  **Language:** JavaScript/Node.js  **License:** NPDL-1.0  
-**Version:** v3.7.0  **Last push:** 2026-09-29  **npm:** `llm-checker@latest`  
+**Version:** 3.7.0  **Last push:** 2026-09-29  **npm:** `llm-checker@latest`  
 **Verified:** 2026-09-29.
 
 **What it claims:**
@@ -3919,7 +3919,7 @@ is the closest thing to reading GGUF tensor_info (our OQ-C3-1) in a Python tool.
 | **llm-roofline** | 0 | no release (2026-06-20) | Minimal, readable decode floor | Abandoned; no enforcement; no KV term; no quant-aware sizing |
 | **hardware-aware-llm-runtime** | 0 | no release (2026-06-25) | Hardware-calibrated roofline; analytical optimal batch | Abandoned; prediction only |
 | **llm-vram-calculator** | 1 | no release (2026-09-26) | 100+ models × 70+ GPUs; public API | API-dependent; no offline mode; no enforcement; no CPU DRAM model |
-| **signerless/llm-checker** | 3,000 | v3.7.0 (2026-09-29) | Largest model catalog (33k artifacts); MCP server; calibrated bytes/param table; structural GGUF verify | Node.js + npm; prediction + model selection only; no enforcement; no exit 2 on budget refusal |
+| **signerless/llm-checker** | 3,000 | 3.7.0 (2026-09-29) | Largest model catalog (33k artifacts); MCP server; calibrated bytes/param table; structural GGUF verify | Node.js + npm; prediction + model selection only; no enforcement; no exit 2 on budget refusal |
 | **kkpkishan/llm-infra-planner** | 11 | no release (2026-09-29) | Most complete browser calculator (inference + fine-tune + training + reverse); activation formula; property-based tests | Web app only; no CLI, no enforcement, no CI integration |
 | **09Catho/VRAMancer** | 1 | v1.2 (2026-09-28) | Rust CLI+TUI; JSON output; hardware detection | Prediction only; no enforcement; no typed exit-2 refusal; early-stage |
 | **Sheikyon/LLM-X** | 4 | PyPI (2026-09-28) | 1.8% error by reading real tensors (not formula); memory deficit/surplus alerts | Python + pip; SafeTensors only (no GGUF); prediction only |
@@ -3954,7 +3954,7 @@ structured 503 with a named binding constraint.  This is unserved.
 
 | Tool | MCP server | Hardware probe tool | Memory admit/refuse tool |
 |------|-----------|---------------------|--------------------------|
-| llm-checker | Yes (v3.7.0) | `hw_detect` | No (`ollama_plan` gives settings; no typed refusal) |
+| llm-checker | Yes (3.7.0) | `hw_detect` | No (`ollama_plan` gives settings; no typed refusal) |
 | fitsproof-rs (v0.2) | Yes | `probe` | `admit` (returns `isError: true` with binding constraint) |
 
 llm-checker's MCP server (`ollama_plan`, `verify_context`) answers "what settings
@@ -3979,7 +3979,7 @@ compares them:
 | Tool | Q4_K_M bpw | Source |
 |------|-----------|--------|
 | fitsproof-rs v0.1 | 4.0 (= n_params × 0.5) | Formula; known underestimate (OQ-C2-1) |
-| llm-checker v3.7.0 | 4.64 (= 0.58 bytes × 8) | Calibrated against real Ollama sizes |
+| llm-checker 3.7.0 | 4.64 (= 0.58 bytes × 8) | Calibrated against real Ollama sizes |
 | kkpkishan/llm-infra-planner | 4.848 (= 0.606 × 8) | README table, source not stated |
 | Theoretical Q4_K superblock | 4.4375 | ggml discussion #5063 (source 20) |
 | GPTQ (128-element groups) | 4.25 | Frantar et al. 2022 (source 40) |
@@ -5693,7 +5693,7 @@ non-dominated front of (predicted_peak_bytes, predicted_tok_s), runnable offline
 | **llm-roofline** | 0 | no release (2026-06-20) | Minimal decode floor | Abandoned; no enforcement |
 | **hardware-aware-llm-runtime** | 0 | no release (2026-06-25) | Hardware-calibrated roofline | Abandoned; prediction only |
 | **llm-vram-calculator** | 1 | no release (2026-08-03) | 100+ models × 70+ GPUs; API | API-dependent; no enforcement |
-| **signerless/llm-checker** | 2,998 | v3.7.0 (2026-09-29) | 33k model catalog; MCP server; calibrated bpw | Node.js; prediction/selection only; no enforcement; no exit 2 |
+| **signerless/llm-checker** | 2,998 | 3.7.0 (2026-09-29) | 33k model catalog; MCP server; calibrated bpw | Node.js; prediction/selection only; no enforcement; no exit 2 |
 | **kkpkishan/llm-infra-planner** | 11 | no release (2026-09-24) | Browser calc; activation formula; property tests | Web app; no CLI; no enforcement |
 | **09Catho/VRAMancer** | 1 | v1.2 (2026-06-08) | Rust CLI+TUI; JSON output | Prediction only; no typed exit-2; early-stage |
 | **Sheikyon/LLM-X** | 4 | PyPI (2026-01-27) | 1.8% error from tensor reads; SafeTensors | Python; SafeTensors only; prediction only |
@@ -7586,7 +7586,7 @@ degrade gracefully when the first-choice quant doesn't fit.  The critical differ
 **What it claims (from README, fetched 2026-09-29):**
 
 Ignis is a from-scratch Rust LLM inference engine with a **real tensor-graph compiler**.
-It loads GGUF files (v2/v3), dequantizes weights (F32, F16, Q8_0, Q4_0) on the fly using
+It loads GGUF files (versions 2 and 3), dequantizes weights (F32, F16, Q8_0, Q4_0) on the fly using
 memory-mapped I/O, runs the full Qwen2 transformer forward pass, and applies an **SSA-based
 tensor-graph IR** with two optimization passes:
 
@@ -7704,7 +7704,7 @@ They are complementary: OxiLLaMa runs the model; fitsproof-rs proves it will fit
 | Tool | Stars | Version | Last push | Gap fitsproof-rs fills |
 |------|-------|---------|-----------|------------------------|
 | **AlexsJones/llmfit** | 37,300 | v0.9.x (2026-09-29) | 2026-09-29 | Model selector only (database-driven, not local GGUF); recommendation output, not enforcement; no typed exit-2 budget refusal; no stress harness; no allocator_peak vs VmHWM delta |
-| **signerless/llm-checker** | 2,998 | v3.7.0 (2026-09-29) | 2026-09-29 | Node.js; prediction+selection only; no enforcement; no exit 2 on budget refusal |
+| **signerless/llm-checker** | 2,998 | 3.7.0 (2026-09-29) | 2026-09-29 | Node.js; prediction+selection only; no enforcement; no exit 2 on budget refusal |
 | **kkpkishan/llm-infra-planner** | 11 | no release (2026-09-24) | 2026-09-24 | Web app only; no CLI; no enforcement |
 | **ridgepoint** | 1 | 0.1.2 PyPI (2026-09-08) | 2026-09-08 | GPU-only (A100/H100); Python; prediction only |
 | **llm-inference-calculator** | 21 | no release (2026-09-09) | 2026-09-09 | Prediction only; Python; no enforcement |
@@ -9546,7 +9546,7 @@ implements typed per-layer degradation records — this strengthens the typed de
 | Tool | Stars | Version | Last push | Gap fitsproof-rs fills |
 |------|-------|---------|-----------|------------------------|
 | **AlexsJones/llmfit** | 37,395 | v0.9.x | 2026-09-29 | Model selector (database-driven, not local GGUF); recommendation output, not enforcement; no typed exit-2 refusal; no stress harness; no allocator_peak vs VmHWM delta |
-| **signerless/llm-checker** | 3,000 | v3.7.0 | 2026-09-06 | Node.js; prediction+selection only; no enforcement; no exit 2 on refusal |
+| **signerless/llm-checker** | 3,000 | 3.7.0 | 2026-09-06 | Node.js; prediction+selection only; no enforcement; no exit 2 on refusal |
 | **kkpkishan/llm-infra-planner** | 11 | no release | 2026-04-23 | Web app only; no CLI; no enforcement |
 | **ridgepoint** | 1 | 0.1.2 PyPI | 2026-09-08 | GPU-only (A100/H100); Python; prediction only; ~1% MAPE but no enforcement |
 | **llm-inference-calculator** | 21 | no release | 2026-09-09 | Prediction only; Python; no enforcement |

@@ -63,7 +63,7 @@ vs OS VmHWM.  No tool in the table below provides this combination for the 4–8
 | **llm-roofline** | 0 | no release | 2026-06-20 | Abandoned; prediction only; no enforcement |
 | **hardware-aware-llm-runtime** | 0 | no release | 2026-06-25 | Abandoned; prediction only |
 | **llm-vram-calculator** | 1 | no release | 2026-08-03 | API-dependent; no offline mode; no enforcement |
-| **signerless/llm-checker** | 3,000 | v3.7.0 | 2026-09-29 | Node.js; prediction+selection only; no enforcement; no exit 2 on budget refusal |
+| **signerless/llm-checker** | 3,000 | 3.7.0 | 2026-09-29 | Node.js; prediction+selection only; no enforcement; no exit 2 on budget refusal |
 | **kkpkishan/llm-infra-planner** | 11 | no release | 2026-09-24 | Web app only; no CLI; no enforcement; no CI integration |
 | **09Catho/VRAMancer** | 1 | v1.2 | 2026-06-08 | Prediction only; no typed exit-2 refusal; early-stage (9 commits) |
 | **Sheikyon/LLM-X** | 4 | PyPI | 2026-01-27 | Python; SafeTensors only (no GGUF); prediction only |

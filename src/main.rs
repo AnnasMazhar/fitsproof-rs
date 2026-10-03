@@ -627,7 +627,7 @@ fn load_model_config(args: &[String], subcommand: &str) -> Result<ModelConfig, E
                     eprintln!(
                         "fitsproof {subcommand}: failed to read GGUF header from '{path}': {e}"
                     );
-                    eprintln!("  The file must be a valid GGUF v1/v2/v3 model file.");
+                    eprintln!("  The file must be a valid GGUF (version 1, 2 or 3) model file.");
                     eprintln!(
                         "  Obtain a GGUF model from HuggingFace (search for Q4_K_M variants)."
                     );

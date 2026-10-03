@@ -561,7 +561,7 @@ always used — making the ADOPTION.md integration recipe fictional.
 
 **Command (plan):**
 ```
-./target/release/fitsproof plan --model /home/openclaw/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
+./target/release/fitsproof plan --model ~/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
   --budget-gb 8 --quant q4_k_m --context 4096
 ```
 
@@ -576,7 +576,7 @@ Context length:  4096
 
 **Command (admit — fits):**
 ```
-./target/release/fitsproof admit --model /home/openclaw/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
+./target/release/fitsproof admit --model ~/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
   --budget-gb 4 --quant q4_k_m --context 4096; echo "exit: $?"
 ```
 
@@ -588,7 +588,7 @@ exit: 0
 
 **Command (admit — refused):**
 ```
-./target/release/fitsproof admit --model /home/openclaw/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
+./target/release/fitsproof admit --model ~/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf \
   --budget-gb 2.0 --quant q4_k_m --context 4096; echo "exit: $?"
 ```
 
@@ -1407,7 +1407,7 @@ kv_cache_bytes, and activation_bytes.
 
 **Command:**
 ```
-/home/openclaw/.cargo/bin/cargo mutants --file src/cost.rs --no-times --no-shuffle
+~/.cargo/bin/cargo mutants --file src/cost.rs --no-times --no-shuffle
 ```
 
 **Raw output (summary from mutants.out/caught.txt):**

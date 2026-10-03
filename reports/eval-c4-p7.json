@@ -2,7 +2,7 @@
   "cycle": 4,
   "pass": 7,
   "tool": "cargo-test",
-  "command": "/home/openclaw/.cargo/bin/cargo test --all-targets",
+  "command": "~/.cargo/bin/cargo test --all-targets",
   "tests_run": 241,
   "failures": 0,
   "cargo_rc": 0,

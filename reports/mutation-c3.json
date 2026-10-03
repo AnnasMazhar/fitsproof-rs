@@ -1,7 +1,7 @@
 {
   "cycle": 3,
   "tool": "cargo-mutants",
-  "command": "/home/openclaw/.cargo/bin/cargo mutants --no-times --no-shuffle",
+  "command": "~/.cargo/bin/cargo mutants --no-times --no-shuffle",
   "rc": 1,
   "killed": null,
   "total": null,
@@ -11,7 +11,7 @@
   "target": 0.7,
   "tail": [
     "Found 1241 mutants to test",
-    "Error: Failed to copy /home/openclaw/portfolio/fitsproof-rs/README.md to /tmp/cargo-mutants-fitsproof-rs-UDnBnw.tmp/README.md",
+    "Error: Failed to copy ~/portfolio/fitsproof-rs/README.md to /tmp/cargo-mutants-fitsproof-rs-UDnBnw.tmp/README.md",
     "",
     "Caused by:",
     "    Disk quota exceeded (os error 122)",

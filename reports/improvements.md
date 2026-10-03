@@ -485,7 +485,7 @@ indication of valid values or how to fix the problem.
 
 ### Evidence
 
-Real GGUF file: `/home/openclaw/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf`
+Real GGUF file: `~/.cache/fitsproof/gguf/Qwen3-1.7B-Q4_K_M.gguf`
 
 - `fitsproof plan --model <path> --budget-gb 8 --quant q4_k_m --context 4096` → `Predicted peak: 3.664 GB, Verdict: Fits`
 - `fitsproof admit --model <path> --budget-gb 8 --quant q4_k_m --context 4096` → `ADMITTED (margin: 4335.8 MB), exit 0`
