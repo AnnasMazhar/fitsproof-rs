@@ -304,6 +304,47 @@ mod tests {
         }
     }
 
+    /// F10: RoPE known-answer test at position 1 (non-trivial rotation).
+    ///
+    /// Hand-computed from Su et al. 2022:
+    ///   pos=1, head_dim=4, base=10000
+    ///   pair 0: θ = 1 / 10000^0 = 1.0
+    ///           x0' = 1*cos(1) - 2*sin(1),  x1' = 2*cos(1) + 1*sin(1)
+    ///   pair 1: θ = 1 / 10000^0.5 = 0.01
+    ///           x2' = 3*cos(0.01) - 4*sin(0.01),  x3' = 4*cos(0.01) + 3*sin(0.01)
+    #[test]
+    fn rope_position_one_known_answer() {
+        // Two tokens, one head, head_dim=4.
+        // Token at pos=0: identity (all zeros so we can ignore it).
+        // Token at pos=1: [1.0, 2.0, 3.0, 4.0].
+        let mut tensor = vec![0.0f32, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0];
+        apply_rope(&mut tensor, 2, 1, 4, 10000.0);
+
+        // pos=0 must stay identity.
+        for v in &tensor[0..4] {
+            assert!(v.abs() < 1e-6, "pos=0 must be identity rotation, got {v}");
+        }
+
+        let cos1 = 1.0_f32.cos();
+        let sin1 = 1.0_f32.sin();
+        let cos001 = 0.01_f32.cos();
+        let sin001 = 0.01_f32.sin();
+
+        let expected = [
+            1.0 * cos1 - 2.0 * sin1,
+            2.0 * cos1 + 1.0 * sin1,
+            3.0 * cos001 - 4.0 * sin001,
+            4.0 * cos001 + 3.0 * sin001,
+        ];
+
+        for (i, (got, want)) in tensor[4..8].iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-5,
+                "rope position=1 index {i}: got {got}, expected {want}"
+            );
+        }
+    }
+
     /// Fault detected: GQA doesn't scale dot product by 1/sqrt(head_dim).
     /// Single token, single head, single KV head — attention over 1 past token
     /// with identical Q and K should produce the V vector.

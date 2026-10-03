@@ -140,22 +140,29 @@ fn context_len_zero_returns_invalid_context_error() {
 
 // ── Budget boundary faults ───────────────────────────────────────────────────
 
-/// Fault: rounding error (> vs >=) causes DoesNotFit when budget exactly equals predicted peak.
-/// Also catches the <= vs < fault: if `<=` is changed to `<`, the verdict falls through to
-/// FitsWithDegradation instead of Fits — which `!= DoesNotFit` would pass but `== Fits` catches.
+/// Fault: rounding error (> vs >=) causes DoesNotFit when budget exactly equals
+/// predicted peak + SAFETY_MARGIN_BYTES.
+///
+/// The fit condition is `predicted_peak + SAFETY_MARGIN_BYTES <= budget`, so
+/// `budget = predicted_peak + SAFETY_MARGIN_BYTES` is the exact boundary that
+/// should return Fits. If `<=` is changed to `<`, the verdict falls through to
+/// FitsWithDegradation instead of Fits.
 #[test]
-fn budget_exactly_at_predicted_peak_admits() {
+fn budget_exactly_at_predicted_peak_plus_margin_admits() {
+    use fitsproof::plan::SAFETY_MARGIN_BYTES;
     let model = small_model();
     let machine = synthetic_machine();
     let peak = cost::estimate(&model, &machine, 128, "fp32", 1.0).total_peak_bytes;
-    let result = plan(&model, &machine, 128, peak, "fp32", 1.0);
+    // Budget = predicted_peak + SAFETY_MARGIN_BYTES (exact boundary).
+    let budget = peak.saturating_add(SAFETY_MARGIN_BYTES);
+    let result = plan(&model, &machine, 128, budget, "fp32", 1.0);
     let p = result.expect("plan must succeed with valid inputs");
     assert_eq!(
         p.verdict,
         Verdict::Fits,
-        "plan with budget == predicted peak must return Verdict::Fits (not FitsWithDegradation \
-         or DoesNotFit); got {:?}. Changing <= to < in plan.rs would produce FitsWithDegradation \
-         here — that is the fault this test detects.",
+        "plan with budget == predicted_peak + SAFETY_MARGIN_BYTES must return Verdict::Fits \
+         (not FitsWithDegradation or DoesNotFit); got {:?}. Changing <= to < in plan.rs would \
+         produce FitsWithDegradation here — that is the fault this test detects.",
         p.verdict
     );
 }

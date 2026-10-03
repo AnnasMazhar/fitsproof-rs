@@ -161,11 +161,12 @@ fn refused_below_any_degradation_fits() {
 
 /// Fault detected: `admit()` applies a mode change without emitting a degradation record.
 ///
-/// A budget between int4 and fp32 peaks forces FitsWithDegradation. The admit()
-/// result MUST carry an applied_degradation record — that is the proof that no
-/// silent mode change occurred.
+/// A budget between int4 + SAFETY_MARGIN and fp32 + SAFETY_MARGIN peaks forces
+/// FitsWithDegradation. The admit() result MUST carry an applied_degradation record
+/// — that is the proof that no silent mode change occurred.
 #[test]
 fn degraded_config_emits_degradation_record() {
+    use fitsproof::plan::SAFETY_MARGIN_BYTES;
     let cfg = ModelConfig::reference();
     let machine = test_machine();
 
@@ -181,8 +182,10 @@ fn degraded_config_emits_degradation_record() {
         "test invariant: int4 must be cheaper than fp32 (int4={int4_peak}, fp32={fp32_peak})"
     );
 
-    // Budget strictly between int4 and fp32 peaks.
-    let budget = int4_peak + (fp32_peak - int4_peak) / 2;
+    // Budget: above int4 threshold (int4_peak + SAFETY_MARGIN) but below fp32 threshold.
+    let int4_threshold = int4_peak.saturating_add(SAFETY_MARGIN_BYTES);
+    let fp32_threshold = fp32_peak.saturating_add(SAFETY_MARGIN_BYTES);
+    let budget = int4_threshold + (fp32_threshold - int4_threshold) / 2;
 
     let p = plan(&cfg, &machine, 512, budget, "none", 0.6).unwrap();
 

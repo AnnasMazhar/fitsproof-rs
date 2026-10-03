@@ -26,6 +26,8 @@ pub enum GgufError {
     InvalidMagic(u32),
     UnsupportedVersion(u32),
     MissingField(String),
+    /// Header or metadata was truncated / corrupt — some KV pairs were not fully read.
+    TruncatedMetadata(String),
 }
 
 impl std::fmt::Display for GgufError {
@@ -35,6 +37,7 @@ impl std::fmt::Display for GgufError {
             GgufError::InvalidMagic(m) => write!(f, "invalid GGUF magic: 0x{m:08x}"),
             GgufError::UnsupportedVersion(v) => write!(f, "unsupported GGUF version: {v}"),
             GgufError::MissingField(k) => write!(f, "missing required field: {k}"),
+            GgufError::TruncatedMetadata(msg) => write!(f, "truncated metadata: {msg}"),
         }
     }
 }
@@ -141,8 +144,10 @@ impl<R: Read> Reader<R> {
 
     fn read_string(&mut self) -> io::Result<String> {
         let len = self.read_u64()? as usize;
-        // Cap at 4 KB to avoid ridiculous allocations on corrupt files.
-        if len > 4096 {
+        // Cap at 256 KB to avoid huge allocations on corrupt files.
+        // Real GGUF strings (chat templates, architecture names) can be up to ~8 KB;
+        // 256 KB is generous without being a DoS risk.
+        if len > 256 * 1024 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("GGUF string too long: {len} bytes"),
@@ -212,16 +217,22 @@ pub fn read_metadata<R: Read>(reader: R) -> Result<GgufMetadata, GgufError> {
 
     // Read key-value metadata pairs.
     let mut kv = std::collections::HashMap::new();
-    for _ in 0..kv_count {
-        let key = match r.read_string() {
-            Ok(k) => k,
-            Err(_) => break, // stop on malformed entry
-        };
-        let value_type = r.read_u32()?;
-        let value = match r.read_value(value_type) {
-            Ok(v) => v,
-            Err(_) => break,
-        };
+    for i in 0..kv_count {
+        let key = r.read_string().map_err(|e| {
+            GgufError::TruncatedMetadata(format!(
+                "failed to read key for entry {i}/{kv_count}: {e}"
+            ))
+        })?;
+        let value_type = r.read_u32().map_err(|e| {
+            GgufError::TruncatedMetadata(format!(
+                "failed to read value_type for key {key:?} (entry {i}/{kv_count}): {e}"
+            ))
+        })?;
+        let value = r.read_value(value_type).map_err(|e| {
+            GgufError::TruncatedMetadata(format!(
+                "failed to read value for key {key:?} type={value_type} (entry {i}/{kv_count}): {e}"
+            ))
+        })?;
         kv.insert(key, value);
     }
 
@@ -378,6 +389,66 @@ mod tests {
         assert!(
             result.is_err(),
             "must return error when required fields are missing"
+        );
+    }
+
+    /// F11: truncated metadata (kv_count claims N entries but file is short) must return Err.
+    ///
+    /// Fault detected: the old `Err(_) => break` silently returned Ok with kv=0 on corrupt input.
+    #[test]
+    fn truncated_metadata_returns_err() {
+        let mut buf = Vec::new();
+        // magic
+        buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        // version = 2
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        // tensor_count = 0
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        // kv_count = 5 (but we only provide 1 entry — rest is truncated)
+        buf.extend_from_slice(&5u64.to_le_bytes());
+        // One valid entry.
+        let key = b"test.key";
+        buf.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        buf.extend_from_slice(key);
+        buf.extend_from_slice(&4u32.to_le_bytes()); // value_type = u32
+        buf.extend_from_slice(&42u32.to_le_bytes()); // value = 42
+                                                     // Truncated here — entries 2–5 are missing.
+
+        let result = read_metadata(Cursor::new(buf));
+        assert!(
+            result.is_err(),
+            "truncated metadata (claims 5 KV entries, only 1 present) must return Err, got Ok"
+        );
+        assert!(
+            matches!(result, Err(GgufError::TruncatedMetadata(_))),
+            "error must be TruncatedMetadata, got {:?}",
+            result.unwrap_err()
+        );
+    }
+
+    /// F11: the u64::MAX array-count bomb must return Err (was: Ok with kv=0 dropped silently).
+    #[test]
+    fn gguf_bomb_array_max_count_returns_err() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&2u32.to_le_bytes()); // version = 2
+        buf.extend_from_slice(&0u64.to_le_bytes()); // tensor_count = 0
+        buf.extend_from_slice(&1u64.to_le_bytes()); // kv_count = 1
+                                                    // key = "bomb"
+        let key = b"bomb";
+        buf.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        buf.extend_from_slice(key);
+        buf.extend_from_slice(&9u32.to_le_bytes()); // value_type = array
+        buf.extend_from_slice(&4u32.to_le_bytes()); // elem_type = u32
+        buf.extend_from_slice(&u64::MAX.to_le_bytes()); // count = u64::MAX (bomb)
+                                                        // Truncated: no actual elements.
+
+        let result = read_metadata(Cursor::new(buf));
+        // The array reader will hit EOF after 0 elements and return Err(UnexpectedEof).
+        // That propagates as TruncatedMetadata (or Io), not Ok.
+        assert!(
+            result.is_err(),
+            "u64::MAX array count bomb must return Err, not Ok"
         );
     }
 }

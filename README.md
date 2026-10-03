@@ -224,12 +224,14 @@ make preflight MODEL=/path/to/llama-7b-q4.gguf BUDGET_GB=4 QUANT=q4_k_m CTX=4096
   design — CPU-first is the point. The hardware class being served (4–8 GB VRAM / 16–32 GB RAM)
   often has compute 5.2 GPUs that cannot run most CUDA kernels anyway.
 
-## What the Python `fitsproof` is (the oracle)
+## Relationship to the Python `fitsproof` (the oracle)
 
-The Python edition (`fitsproof`) is the **reference oracle**. It is not a runtime dependency —
-the shipped binary requires no Python. The oracle relationship is dev-time only: contract
-semantics were ported from Python to Rust, and the Rust versions were checked against Python
-outputs on shared test inputs.
+The Python edition (`fitsproof`) is the **reference oracle**. It is not a runtime
+dependency — the shipped binary requires no Python. The oracle relationship is
+dev-time only: contract semantics were ported from Python to Rust, and the Rust
+contract logic was reviewed for consistency with the Python edition's semantics.
+A differential oracle test comparing Rust and Python outputs on shared test inputs
+is a planned v0.2 item (see `docs/PAPER-TRACEABILITY.md` §9).
 
 Key differences that justify the Rust port:
 
@@ -238,6 +240,15 @@ Key differences that justify the Rust port:
 | Budget enforcement | predicted + measured after the fact | enforced by `TrackingAllocator` — a ceiling is an error, not an OOM |
 | Install | Python + venv + NumPy | one static binary |
 | Mutation testing | pytest + mutmut on NumPy plumbing | `cargo-mutants` on contract logic |
+
+**Ceiling enforcement semantics.** When `verify`/`stress` install a ceiling via
+`ALLOCATOR.set_ceiling(budget_bytes)`, any allocation that would push the process
+past the budget returns null.  Rust's `handle_alloc_error` turns that into an
+immediate process abort (exit 134, SIGABRT) rather than a silent over-budget run.
+This is a loud, observable signal — not a typed `DoesNotFit` error (which requires
+callers to use the advisory `check()` path before allocating).  The abort
+semantics are the enforcement story for v0.1; a typed `Err(DoesNotFit)` choke-point
+through `try_reserve` is a v0.2 item.
 
 ## Architecture
 
@@ -334,8 +345,41 @@ These are honest. A repo with no stated limitations is not credible.
   weights requires a full weight tensor loader — a v0.2 scope item.
 - **Real-weight generation via `serve` / `mcp`.** The HTTP server and MCP server run the reference bundle (randomly-initialised weights). Serving real GGUF weights requires the full weight tensor loader — use `fitsproof plan` or `admit` with `--model` for real-model contract checks.
 - **KV cache bandwidth not in decode formula.** The decode formula counts weight streaming;
-  KV cache access adds bandwidth at long contexts (known limitation, documented in the Python
-  oracle too).
+  KV cache access adds to bandwidth at long contexts (known limitation, documented in the
+  Python oracle too).
+- **Calibrate module.** The `±20%` CI is a placeholder; a fitted calibration (from on-device
+  measurements) is a v0.2 item.
+- **Off-allocator bypass class.** `TrackingAllocator` counts only allocations routed through
+  Rust's `GlobalAlloc`. Three classes bypass it:
+  - **`std::alloc::System` / direct `mmap`**: 64 MiB via `System.alloc_zeroed` produces
+    `VmHWM ≈ 68 MB` while the allocator records `tracking_current ≈ 554 B` — a ~67 MB gap.
+  - **Thread stacks**: each thread maps 8 MiB via the OS (Linux default); not counted by
+    the global allocator. A 32 MiB stack-local buffer produces `VmHWM ≈ 35 MB` vs
+    `tracking_current ≈ 665 B`.
+  - **Static data** (`.bss` / `.data` / `mmap`-ed DSOs): counted by the OS but not the
+    allocator.
+  The **backstop** for this class is the `VmHWM <= budget` gate in `verify` (F2 fix):
+  any off-allocator memory that causes a real over-budget condition will be caught there.
+  `tests/attack_harness.rs` measures and asserts the gap is ≥ 60 MB, so the bypass is
+  visible and documented rather than hidden.
+  Numbers from: independent review REVIEW-muse-spark.md F5 (2026-09-27, ThinkStation P500).
+
+## Comparisons
+
+See `docs/COMPARISONS.md` for the full table with current star counts and release dates. Short version:
+
+| Tool | What it does better than fitsproof-rs |
+|---|---|
+| llama.cpp | Mature, broad model support, fast CPU kernels, broad quant support, actually generates text |
+| vLLM | GPU serving, PagedAttention, high throughput |
+| KTransformers | CPU/GPU hybrid MoE, AMX, runs 671B on 14 GB VRAM |
+| mistral.rs | Production Rust inference, GPU/CPU, Python bindings, broad model support |
+| ridgepoint | Calibrated VRAM/roofline for GPU (A100/H100, ~1% MAPE) |
+| Strata | Consumer packaging, one-click install |
+
+fitsproof-rs's position: none of the above couples a resource contract (predict + enforce a
+byte ceiling + measure proof + degrade explicitly) into a single binary, for the unserved
+4–8 GB VRAM / 16–32 GB RAM hardware class.
 
 ## Licence
 

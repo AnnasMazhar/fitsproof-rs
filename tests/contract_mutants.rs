@@ -215,21 +215,23 @@ fn plan_verdict_does_not_fit_when_zero_budget() {
     );
 }
 
-/// Fault detected: plan() not checking if `predicted_peak <= budget_bytes` correctly
+/// Fault detected: plan() not checking if `predicted_peak + SAFETY_MARGIN <= budget_bytes` correctly
 /// (e.g. using < instead of <=, causing off-by-one at the exact boundary).
 #[test]
 fn plan_fits_at_exact_peak() {
+    use fitsproof::plan::SAFETY_MARGIN_BYTES;
     let cfg = ModelConfig::reference();
     let machine = ref_machine();
     let fp32_peak = cost::weight_bytes(&cfg, "none")
         + cost::kv_cache_bytes(&cfg, 512, "fp16")
         + cost::activation_bytes(&cfg);
-    // Budget exactly equals peak — must Fit.
-    let p = plan(&cfg, &machine, 512, fp32_peak, "none", 0.6).unwrap();
+    // Budget = peak + SAFETY_MARGIN_BYTES — must Fit.
+    let budget = fp32_peak.saturating_add(SAFETY_MARGIN_BYTES);
+    let p = plan(&cfg, &machine, 512, budget, "none", 0.6).unwrap();
     assert_eq!(
         p.verdict,
         Verdict::Fits,
-        "budget == predicted_peak must produce Fits, got {:?} (peak={fp32_peak})",
+        "budget == predicted_peak + SAFETY_MARGIN must produce Fits, got {:?} (peak={fp32_peak})",
         p.verdict
     );
 }
@@ -775,22 +777,25 @@ fn does_not_fit_plan_is_error_trait_object() {
 // plan.rs mutation-killing tests (c6-p04-implement-1)
 // ---------------------------------------------------------------------------
 
-/// Fault detected: `predicted_peak <= budget_bytes` replaced with `predicted_peak < budget_bytes`
-/// (off-by-one: exact-fit should be Fits, not FitsWithDegradation).
-/// Also kills: `predicted_peak > budget_bytes` replacing `predicted_peak <= budget_bytes`.
+/// Fault detected: `predicted_peak + SAFETY_MARGIN <= budget_bytes` replaced with
+/// `predicted_peak + SAFETY_MARGIN < budget_bytes` (off-by-one: exact-fit should be Fits,
+/// not FitsWithDegradation).
+/// Also kills: `predicted_peak + SAFETY_MARGIN > budget_bytes` replacing the condition.
 #[test]
 fn plan_exact_peak_equals_budget_is_fits_not_degraded() {
+    use fitsproof::plan::SAFETY_MARGIN_BYTES;
     let cfg = ModelConfig::reference();
     let machine = ref_machine();
     // Get the exact predicted peak bytes by planning with a huge budget.
     let p_huge = plan(&cfg, &machine, 512, u64::MAX / 2, "none", 0.6).unwrap();
     let exact_peak = p_huge.predicted_peak_bytes;
-    // Now plan with budget == exact peak: must be Fits (not FitsWithDegradation or DoesNotFit).
-    let p = plan(&cfg, &machine, 512, exact_peak, "none", 0.6).unwrap();
+    // Now plan with budget == exact peak + SAFETY_MARGIN: must be Fits (not FitsWithDegradation or DoesNotFit).
+    let budget = exact_peak.saturating_add(SAFETY_MARGIN_BYTES);
+    let p = plan(&cfg, &machine, 512, budget, "none", 0.6).unwrap();
     assert_eq!(
         p.verdict,
         Verdict::Fits,
-        "plan with budget == predicted peak must be Fits; \
+        "plan with budget == predicted peak + SAFETY_MARGIN must be Fits; \
          `<=` mutated to `<` would produce FitsWithDegradation"
     );
 }
@@ -875,18 +880,21 @@ fn plan_ci_upper_is_above_predicted_peak() {
 /// We assert that FitsWithDegradation has at least one fitting degradation step.
 #[test]
 fn plan_fits_with_degradation_has_fitting_step_not_empty() {
+    use fitsproof::plan::SAFETY_MARGIN_BYTES;
     // fp32 with very tight budget: must require degradation (int8 or int4 should fit).
     let cfg = ModelConfig::reference();
     let machine = ref_machine();
-    // Budget: just below fp32 peak but well above int4 peak.
+    // Budget: below fp32 peak + SAFETY_MARGIN but well above int4 peak + SAFETY_MARGIN.
     let fp32_peak = fitsproof::cost::weight_bytes(&cfg, "none")
         + fitsproof::cost::kv_cache_bytes(&cfg, 512, "fp16")
         + fitsproof::cost::activation_bytes(&cfg);
-    let p = plan(&cfg, &machine, 512, fp32_peak - 1, "none", 0.6).unwrap();
+    // Budget 1 byte below fp32 threshold (= fp32_peak + SAFETY_MARGIN - 1).
+    let budget = fp32_peak.saturating_add(SAFETY_MARGIN_BYTES) - 1;
+    let p = plan(&cfg, &machine, 512, budget, "none", 0.6).unwrap();
     assert_eq!(
         p.verdict,
         Verdict::FitsWithDegradation,
-        "plan just below fp32 peak must be FitsWithDegradation"
+        "plan just below fp32 threshold must be FitsWithDegradation"
     );
     let fitting_count = p.degradations.iter().filter(|d| d.fits_budget).count();
     assert!(
@@ -950,12 +958,15 @@ fn admit_fits_margin_is_correct_arithmetic() {
 /// but status would be Admitted — a silent mode change.
 #[test]
 fn admit_degraded_status_is_degraded_not_admitted() {
+    use fitsproof::plan::SAFETY_MARGIN_BYTES;
     let cfg = ModelConfig::reference();
     let machine = ref_machine();
     let fp32_peak = fitsproof::cost::weight_bytes(&cfg, "none")
         + fitsproof::cost::kv_cache_bytes(&cfg, 512, "fp16")
         + fitsproof::cost::activation_bytes(&cfg);
-    let p = plan(&cfg, &machine, 512, fp32_peak - 1, "none", 0.6).unwrap();
+    // Budget 1 byte below fp32 threshold (= fp32_peak + SAFETY_MARGIN - 1).
+    let budget = fp32_peak.saturating_add(SAFETY_MARGIN_BYTES) - 1;
+    let p = plan(&cfg, &machine, 512, budget, "none", 0.6).unwrap();
     assert_eq!(p.verdict, Verdict::FitsWithDegradation);
     let rec = admit(p);
     assert_eq!(
@@ -996,12 +1007,15 @@ fn admit_refused_status_is_refused_not_degraded_or_admitted() {
 /// distinguish admitted from degraded by message prefix.
 #[test]
 fn admit_degraded_message_prefix_is_degraded_not_admitted() {
+    use fitsproof::plan::SAFETY_MARGIN_BYTES;
     let cfg = ModelConfig::reference();
     let machine = ref_machine();
     let fp32_peak = fitsproof::cost::weight_bytes(&cfg, "none")
         + fitsproof::cost::kv_cache_bytes(&cfg, 512, "fp16")
         + fitsproof::cost::activation_bytes(&cfg);
-    let p = plan(&cfg, &machine, 512, fp32_peak - 1, "none", 0.6).unwrap();
+    // Budget 1 byte below fp32 threshold (= fp32_peak + SAFETY_MARGIN - 1).
+    let budget = fp32_peak.saturating_add(SAFETY_MARGIN_BYTES) - 1;
+    let p = plan(&cfg, &machine, 512, budget, "none", 0.6).unwrap();
     let rec = admit(p);
     assert!(
         rec.message.starts_with("DEGRADED:"),
