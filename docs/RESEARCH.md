@@ -10117,3 +10117,542 @@ algorithmic sources required — resolutions grounded in sources 80, 82, 85, 86,
 Companion document: `docs/ADOPTION.md` §16.  All links for cited sources verified on
 dates documented in their original cycle 6 pass 1 entries.  Zero open questions remain
 across all six cycles.*
+
+---
+
+# Cycle 7, Pass 1 — Ground Truth: What the Rust Checker Does Not Prove Relative to fitsproof (2026-10-12)
+
+Cycle 7 is an improvement cycle, not a new product. Its three research passes are scoped:
+(1) what the Rust checker does not prove relative to Python `fitsproof`,
+(2) the compiled tools a user would compare,
+(3) the adoption gap. Later passes implement only that gap.
+
+This pass is (1). The single largest proven gap is the **`calibrate` module**:
+Python `fitsproof/contract/calibrate.py` (read in full this pass, 280 lines) fits
+`bandwidth_utilisation` from on-device measurements with a train/held-out split and
+reports held-out MAPE plus a bootstrap 95% CI. The Rust checker has none of this:
+`bandwidth_utilisation` is a hardcoded default (0.6), there is no measurement path,
+no fit, no MAPE, and no interval. The Rust `tok/s` number is therefore advisory with
+*unknown* uncertainty, while the Python sibling ships an honest error bar. Every other
+claim in this pass is subordinate to that gap.
+
+**Measured baseline for this cycle** (authoritative: `reports/mutation-c6.json`):
+1/3 mutants killed = 33.3%. Gate: 70%. Quoted exactly; not re-derived.
+
+---
+
+## The gap, precisely (file-level)
+
+| Capability | Python `fitsproof` (`contract/calibrate.py`) | Rust `fitsproof-rs` |
+|---|---|---|
+| Fit `bandwidth_utilisation` from measurements | `_fit_bandwidth_utilisation`: closed-form mean of implied utils on train set | hardcoded default 0.6; no fit path |
+| Train/held-out split | seeded permutation, `train_fraction=0.67` | none |
+| Held-out error metric | `_mape` on held-out set (the "honest number") | none |
+| Uncertainty on the metric | `_bootstrap_mape_ci`: 1000 seeded resamples, (2.5%, 97.5%) quantiles | none |
+| Timing methodology | median of repeats, decode steps only (prefill excluded), `time.perf_counter` | STREAM/GEMM probe only; no tok/s measurement |
+| Degenerate-data guard | `n < 2` → fit-all, report on train, CI collapses to a point | n/a |
+
+The Python docstring states the three faults its own tests guard:
+fit-on-held-out (optimistic MAPE), divide-by-predicted (inverted error),
+train-distribution CI (inflated confidence). A Rust port must preserve all three
+guards or it proves less than the oracle it claims to follow.
+
+---
+
+## Table of sources (cycle 7, pass 1 additions)
+
+| # | Source | Drives |
+|---|--------|--------|
+| 93 | Efron 1979 — Bootstrap Methods (Ann. Statist.) | bootstrap percentile CI method |
+| 94 | Hyndman & Koehler 2006 — accuracy measures incl. MAPE (IJF) | held-out metric definition + limits |
+| 95 | Hastie, Tibshirani & Friedman — ESL 2nd ed., Ch. 7 (Springer) | train/test optimism, CV theory |
+| 96 | NIST/SEMATECH e-Handbook — linear least squares | closed-form fit justification |
+| 97 | DiCiccio & Efron 1996 — bootstrap confidence intervals (Statist. Sci.) | percentile-CI failure modes, BCa |
+| 98 | scikit-learn user guide — cross-validation | practice spec: never fit on test |
+| 99 | NIST/SEMATECH e-Handbook — measures of location | median-of-repeats robustness |
+| 100 | NumPy `median` reference | median timing implementation |
+| 101 | NumPy `quantile` reference | CI endpoint computation |
+| 102 | NumPy `Generator` / `permutation` reference | seeded split reproducibility |
+| 103 | Python `time.perf_counter` docs | monotonic timing source |
+| 104 | Rust `std::time::Instant` docs | Rust-side timing for the implement pass |
+| 105 | Hyndman 2006 — MASE paper (`mase.pdf`) | MAPE fallback when actuals hit zero |
+
+All links verified to resolve on 2026-10-12 (curl, HTTP 200 after redirects).
+
+---
+
+## 93. Efron 1979 — Bootstrap Methods: Another Look at the Jackknife
+
+**Link:** https://doi.org/10.1214/aos/1176344552
+**Status:** Resolves 2026-10-12. Annals of Statistics, vol. 7, no. 1, pp. 1–26. Open access via Project Euclid.
+
+### Method
+
+Given iid data `x = (x_1, ..., x_n)` from unknown `F`, estimate the sampling
+distribution of a statistic `θ̂ = s(x)` by the plug-in principle: replace `F`
+with the empirical distribution `F̂_n` and resample.
+
+**Bootstrap replicate:**
+```
+x* = (x*_1, ..., x*_n), each x*_i drawn iid from F̂_n (i.e. with replacement from x)
+θ̂*(b) = s(x*(b)),  b = 1..B
+```
+
+**Percentile confidence interval** (the method Python `_bootstrap_mape_ci` implements):
+```
+CI_{1-α} = [ G^{-1}(α/2), G^{-1}(1-α/2) ]
+```
+where:
+- `G` = empirical CDF of the `B` bootstrap replicates `θ̂*(b)`
+- `G^{-1}(q)` = q-quantile of the replicates (via `np.quantile`, source 101)
+- Python uses `B = 1000`, `α = 0.05`, seeded RNG (`seed=42`)
+
+Notation: `θ̂` = MAPE computed on one resample of the (predicted, actual) held-out
+pairs; the pairs are resampled jointly (row resampling), preserving the
+prediction↔actual pairing.
+
+### Assumptions
+
+- The held-out pairs are iid draws from the deployment distribution of
+  configurations. (Violated in a structured sense: our "population" is a small
+  hand-built config grid, not a random sample — see failure mode 3.)
+- The statistic `s` is smooth (Hadamard differentiable) in `F`. MAPE as a
+  function of the data is smooth wherever all actuals are non-zero — guaranteed
+  by the `nonzero` mask in `_mape`.
+- `B` large enough that Monte Carlo error at the quantiles is negligible:
+  se of the α/2 quantile ≈ `sqrt((α/2)(1-α/2) / B) / g(G^{-1})`; at B=1000 the
+  Monte Carlo noise on the interval endpoints is second-order vs the
+  statistical width for the tiny `n` we have.
+
+### Failure modes (per Efron 1979 and the bootstrap literature)
+
+1. **Tiny n.** With `n = 2` held-out points there are only 3 distinct resamples;
+   the "95% CI" is a fiction with 2000% nominal granularity. Python's
+   `n < 2 → (m, m)` guard concedes the point for n=1 but `n = 2..5` CIs are
+   still nearly degenerate. The Rust port must either refuse to report a CI
+   below a minimum `n` or widen it honestly (see source 97, BCa still fails here).
+2. **Dependence across configs.** Bootstrap resampling assumes iid pairs.
+   Config measurements on one machine share thermal state and allocator history;
+   positive correlation narrows the bootstrap CI below its nominal coverage.
+   Mitigation (implement pass): interleave measurement order, cool-down sleeps —
+   methodology, not statistics.
+3. **Non-representative grid.** The held-out set is a designed grid, not a
+   random sample of deployment configs. The CI covers "MAPE on grids like this
+   one", not "MAPE on the user's model". This is the same caveat as any
+   benchmark; it must be stated in the CLI output, not footnoted away.
+
+---
+
+## 94. Hyndman & Koehler 2006 — Another Look at Measures of Forecast Accuracy
+
+**Link:** https://doi.org/10.1016/j.ijforecast.2006.03.001
+**Status:** Resolves 2026-10-12. International Journal of Forecasting, vol. 22, no. 4, pp. 679–688.
+
+### Method
+
+**MAPE (the metric Python `_mape` implements):**
+```
+MAPE = mean( |y_t − ŷ_t| / |y_t| ) × 100
+```
+where:
+- `y_t` = actual (measured tok/s), `ŷ_t` = predicted tok/s
+- Python masks `y_t = 0` (`nonzero = actual != 0`; all-zero actuals → NaN)
+
+Scale-independence is the reason MAPE is the right choice here: tok/s varies by
+orders of magnitude across configs (tiny reference bundle vs 7B real weights),
+so an absolute error (MAE/RMSE) would be dominated by the fastest config.
+
+### Assumptions
+
+- All actuals strictly non-zero (else the term is undefined; the mask handles it).
+- The relative error is the decision-relevant loss: a 10% tok/s miss matters
+  equally at 5 tok/s and 500 tok/s. True for capacity planning (the use case);
+  false for latency SLOs (where absolute miss matters) — tok/s is advisory, so
+  the assumption holds for our stated scope.
+
+### Failure modes (per Hyndman & Koehler 2006)
+
+1. **Zero actuals → undefined/infinite.** Guarded by the `nonzero` mask; a Rust
+   port must reproduce the mask, not just the formula. A test with an actual of
+   0.0 must yield exclusion (or NaN), never inf.
+2. **Asymmetry / selection bias toward under-forecasts.** Equal absolute errors
+   at small actuals contribute more than at large actuals; model selection on
+   MAPE systematically favours under-prediction. For a *safety-adjacent*
+   advisory number this bias points the safe way (pessimistic tok/s), but it
+   must not leak into the byte predictions, which use no MAPE.
+3. **Skewed error distribution.** The mean of absolute percentage errors is
+   pulled by outliers (one thermal-throttled measurement). Python's median-of-
+   repeats timing (sources 99–100) dampens this at the measurement level; the
+   implement pass should additionally report median APE alongside MAPE.
+
+---
+
+## 95. Hastie, Tibshirani & Friedman — The Elements of Statistical Learning, 2nd ed., Ch. 7
+
+**Link:** https://link.springer.com/book/10.1007/978-0-387-84858-7
+**Status:** Resolves 2026-10-12. Springer Series in Statistics. Ch. 7 is
+"Model Assessment and Selection".
+
+### Method
+
+**Training error vs test error.** For loss `L` and fit `f̂` trained on `T`:
+```
+err̄_in  = (1/N) Σ L(y_i, f̂(x_i))          (training error, optimistic)
+Err     = E[L(Y, f̂(X))]                     (test error at a new point)
+```
+**Optimism** (ESL §7.4): `op = Err_in − err̄_in ≥ 0` in expectation for
+adaptive fits. Python's docstring states the concrete instance: "fitting and
+evaluating on the same set gives optimistic MAPE=0 for the exact fitted case".
+
+**K-fold CV estimate** (ESL §7.10):
+```
+CV(f̂) = (1/N) Σ_{i=1}^{N} L(y_i, f̂^{−κ(i)}(x_i))
+```
+where `f̂^{−κ(i)}` is the fit with fold `κ(i)` removed. Python's single
+train/held-out split is the small-K special case with one held-out fold
+evaluated once.
+
+### Assumptions
+
+- Train and held-out draws come from the same joint distribution (ESL §7.1).
+  Our split is a random partition of one grid, so this holds by construction —
+  with the caveat of source 93 failure mode 3 (grid ≠ deployment population).
+- The fitting procedure is re-run per fold. Python refits `u` on train only;
+  the held-out predictions use the train-fitted `u`. A Rust port must keep the
+  fit function pure of held-out data (fault: fitting on all, evaluating on
+  held-out — named in the Python docstring).
+
+### Failure modes (per ESL Ch. 7)
+
+1. **Optimism from reuse.** Any statistic of the held-out set that influences
+   the fit (even choosing `train_fraction` by looking at held-out MAPE) voids
+   the "honest number" claim. The seed and fraction must be constants, not
+   tuned.
+2. **High variance of single-split estimates.** One 67/33 split at tiny `n`
+   has large split-to-split variance; ESL recommends K≥5 folds or the
+   bootstrap for small samples. With `n = 3` measurements (Python's default
+   grid) there is exactly one held-out point — the "CI" is degenerate by
+   construction. The implement pass must set a minimum measurement count or
+   report the degeneracy (this becomes OQ-C7-1).
+3. **Leakage through shared machine state.** Same warning as source 93 mode 2,
+   restated at the methodology level: held-out is not independent of train when
+   both are timed minutes apart on one warming machine.
+
+---
+
+## 96. NIST/SEMATECH e-Handbook — Linear Least Squares Regression
+
+**Link:** https://www.itl.nist.gov/div898/handbook/pmd/section1/pmd141.htm
+**Status:** Resolves 2026-10-12. NIST official methods documentation.
+
+### Method
+
+For the single-parameter model through the origin (our case):
+```
+y_i = u · x_i + e_i,   y_i = measured tok/s, x_i = bw / W_i
+```
+**Least-squares estimate** (normal equation in one dimension):
+```
+û = Σ x_i y_i / Σ x_i²
+```
+
+Python instead uses the **mean of ratios**:
+```
+û_mean-ratio = mean(y_i / x_i) = mean(measured · W / bw)
+```
+
+These coincide only under homoscedastic relative errors. The mean-of-ratios is
+the least-squares solution to the *relative-error* model
+`(y_i − u·x_i)/y_i`, i.e. it minimises Σ((y_i − u·x_i)/y_i)² — exactly the
+squared analogue of MAPE. So Python's fit minimises the same loss family it
+reports. A Rust port must preserve this pairing (fit on relative error, report
+MAPE), not "upgrade" the fit to OLS while reporting MAPE — that would decouple
+the objective from the metric.
+
+### Assumptions
+
+- Errors multiplicative / proportional to level (relative-error model).
+  Plausible for throughput: timing noise scales with rate.
+- `x_i > 0` (positive bandwidth, positive weight bytes); guarded by
+  `bw <= 0 → 0.6` fallback and the `measured > 0, bytes > 0` filter.
+- Single global `u` across configs (no per-quant or per-context slope).
+  False at long context (KV term, OQ-C2-3) — the fit absorbs it as bias.
+
+### Failure modes
+
+1. **Mean-of-ratios sensitivity to small denominators.** A config with tiny
+   measured tok/s (near-stalled) yields an extreme implied util and drags the
+   mean. The `measured_tok_s > 0` filter is necessary but not sufficient; a
+   floor (e.g. discard implied `u` outside [0.05, 1.0]) is implement-pass scope.
+2. **Fallback constant 0.6 is unmarked.** Both `bw <= 0` and empty-utils paths
+   silently return the default. The Rust port must emit a record when the fit
+   falls back (silent fallback = silent mode change by the campaign's own rule).
+
+---
+
+## 97. DiCiccio & Efron 1996 — Bootstrap Confidence Intervals
+
+**Link:** https://doi.org/10.1214/ss/1032280214
+**Status:** Resolves 2026-10-12. Statistical Science, vol. 11, no. 3, pp. 189–228. Open access via Project Euclid.
+
+### Method
+
+The percentile interval (source 93) has coverage error `O(n^{−1/2})`. The
+**BCa (bias-corrected and accelerated) interval** corrects two defects with two
+estimated constants:
+```
+CI_BCa = [ G^{-1}(Φ(z0 + (z0 + z_{α/2})/(1 − a(z0 + z_{α/2})))), ... ]
+```
+where:
+- `z0 = Φ^{-1}(G(θ̂))` = bias-correction (median bias of bootstrap distribution)
+- `a` = acceleration (rate of change of standard error with θ), estimated by
+  jackknife influence values
+- `Φ` = standard normal CDF, `z_q` = its quantiles
+
+BCa is second-order accurate (coverage error `O(n^{−1})`) and
+transformation-respecting; the percentile interval is neither.
+
+### Assumptions
+
+- Same iid + smoothness assumptions as source 93, plus enough `n` for the
+  jackknife estimate of `a` to be stable (needs `n ≫ 10` in practice).
+
+### Failure modes (this is the failure-modes source for the CI design)
+
+1. **Percentile under-coverage on skewed statistics.** MAPE's sampling
+   distribution at small `n` is right-skewed; the percentile interval
+   under-covers the upper tail — exactly the tail a capacity planner cares
+   about. With `n ≥ ~20` held-out configs, implement BCa; below that, report
+   the percentile interval labelled as first-order (honest labelling beats a
+   fancier interval nobody can afford to compute correctly).
+2. **Jackknife instability at tiny n.** `a` cannot be estimated from 3 points.
+   This is the statistical grounding for OQ-C7-1 (minimum-n rule): the same
+   threshold that breaks BCa is the threshold below which even the percentile
+   CI must carry a degeneracy warning.
+3. **BCa still assumes iid.** It fixes shape, not dependence. Machine-state
+   correlation (sources 93/95) survives BCa; only measurement protocol fixes it.
+
+---
+
+## Supporting sources (brief)
+
+### 98. scikit-learn user guide — Cross-validation: evaluating estimator performance
+
+**Link:** https://scikit-learn.org/stable/modules/cross_validation.html
+**Status:** Resolves 2026-10-12. Practice spec, not a theorem source.
+Role: the industry-standard statement of "never fit on the evaluation set"
+(`cross_val_predict` fits per-fold; `cross_val_score` averages held-out scores).
+The Rust implement pass follows the same discipline: fit object sees train
+indices only. Cited so a reviewer can check the discipline against an
+independent, maintained reference rather than our paraphrase of ESL.
+
+### 99. NIST/SEMATECH e-Handbook — Measures of Location
+
+**Link:** https://www.itl.nist.gov/div898/handbook/eda/section3/eda354.htm
+**Status:** Resolves 2026-10-12.
+Role: grounds median-of-repeats timing. The median has a 50% breakdown point
+vs 0% for the mean: one thermal-throttled repeat out of three cannot move the
+median past the other two. (Scale companion: §1.3.5.6 Measures of Scale,
+`eda356.htm`, likewise verified 2026-10-12 — MAD as the consistent scale
+estimator if the implement pass reports spread.)
+
+### 100. NumPy `median` reference
+
+**Link:** https://numpy.org/doc/stable/reference/generated/numpy.median.html
+**Status:** Resolves 2026-10-12.
+Role: pins the exact averaging convention Python uses (`mean` of the two middle
+values for even `n`). A Rust port must reproduce the even-`n` convention bit
+for bit on the timing path or the differential oracle (Rust vs Python medians
+on identical inputs) fails on even repeat counts.
+
+### 101. NumPy `quantile` reference
+
+**Link:** https://numpy.org/doc/stable/reference/generated/numpy.quantile.html
+**Status:** Resolves 2026-10-12.
+Role: pins the CI endpoint interpolation (`method="linear"` default, i.e.
+continuous piecewise-linear inversion of the empirical CDF). Quantile
+definitions disagree across implementations (Hyndman–Fan taxonomy, nine types);
+the Rust port must implement linear-interpolation quantiles and test the
+endpoints against NumPy values, not against a second Rust implementation.
+
+### 102. NumPy `Generator` / `permutation` reference
+
+**Link:** https://numpy.org/doc/stable/reference/random/generator.html
+**Status:** Resolves 2026-10-12.
+Role: the split (`rng.permutation(n)`) and the bootstrap (`rng.integers`)
+both derive from PCG64 seeded with 42. Reproducibility of the calibration
+report depends on this exact stream. Rust cannot reuse PCG64 output values
+1:1 (different PRNG in tree: xoshiro256**, source 10), so the port must assert
+*distributional* agreement (same MAPE within tolerance across seeds), never
+bit-equality of the split.
+
+### 103. Python `time.perf_counter` docs
+
+**Link:** https://docs.python.org/3/library/time.html
+**Status:** Resolves 2026-10-12 (page verified; `perf_counter` section anchor).
+Role: the measurement clock — monotonic, highest available resolution,
+includes time elapsed during sleep, undefined origin. "Includes sleep" matters:
+cool-down sleeps between repeats count toward wall time but the throughput
+ratio divides them out equally since timing brackets only the generate call.
+
+### 104. Rust `std::time::Instant` docs
+
+**Link:** https://doc.rust-lang.org/std/time/struct.Instant.html
+**Status:** Resolves 2026-10-12. Stable API.
+Role: the implement-pass clock. Same contract as `perf_counter` (monotonic,
+opaque origin) with one documented difference: `Instant` is guaranteed
+monotonic but its granularity is platform-dependent (`Duration` nanosecond
+storage, millisecond reality on some platforms). Throughput ratios need
+microsecond-grade deltas; the implement pass must assert measured granularity
+at startup (double-`now()` delta test) or short decode timings quantise.
+
+### 105. Hyndman 2006 — Another Look at Forecast-Accuracy Metrics (MASE)
+
+**Link:** https://robjhyndman.com/papers/mase.pdf
+**Status:** Resolves 2026-10-12. Author-hosted PDF of the companion paper
+(forecasting encyclopedia entry; MASE proposal).
+Role: the documented escape hatch for source 94 failure mode 1. If a future
+measurement path can produce ~zero actuals (stalled decode), MAPE is replaced
+by MASE (mean absolute scaled error, scaled by in-sample naive MAE — always
+defined). Not needed while the `measured > 0` filter holds; recorded so the
+implement pass has a cited fallback instead of inventing one.
+
+---
+
+## Alternatives considered
+
+### Why MAPE + percentile bootstrap, not RMSE + t-interval?
+
+RMSE on tok/s is dominated by the fastest config (scale dependence); the
+t-interval assumes approximate normality of the estimator, which MAPE at
+`n < 10` flagrantly violates. The percentile bootstrap makes no distributional
+assumption (sources 93, 97). Cost: first-order coverage only — accepted and
+labelled (see falsification 65).
+
+### Why not port the fit as OLS (`Σxy/Σx²`) instead of mean-of-ratios?
+
+Because the report metric is MAPE. Source 96 shows the mean-of-ratios is the
+least-squares solution under the relative-error model — the squared analogue
+of the reported loss. Switching the fit to absolute-error OLS while reporting
+MAPE would optimise one loss and advertise another. The pairing is deliberate;
+keep it.
+
+### Why not cross-config normalisation (fit per quant)?
+
+Python fits one global `u`. Per-quant fits would need ≥2 measurements per quant
+— the default grid has 3 measurements total. Theory (ESL, source 95) says
+split variance already dominates; subdividing further is noise worship.
+Revisit only when the measurement grid exceeds ~20 configs (OQ-C7-1).
+
+---
+
+## Open questions for this cycle (to be closed by pass 3)
+
+### OQ-C7-1 — Minimum held-out n for an honest 95% CI
+
+Sources 93/95/97 jointly imply the current default grid (3 measurements → 1
+held-out point) cannot support any interval claim. The implement pass needs a
+rule: minimum measurements before `calibrate` reports a CI (candidate: n ≥ 6
+total, n_held ≥ 2 with degeneracy warning; full BCa at n_held ≥ 20). The number
+must be justified, not picked. **Open.**
+
+### OQ-C7-2 — Bootstrap RNG in Rust
+
+The tree PRNG is xoshiro256** (source 10); Python uses PCG64 (source 102).
+Bit-equality of resamples is impossible and unnecessary; the port needs a
+*seeded* xoshiro stream plus a distributional-agreement test (same MAPE within
+tolerance across seeds, Rust vs Python on shared fixtures). Straightforward.
+**Open pending implement pass.**
+
+### OQ-C7-3 — Median-of-repeats vs mean for tok/s timing
+
+Source 99 favours the median (50% breakdown); the mean has better efficiency
+under Gaussian noise. Timing noise on a quiet workstation is heavy-tailed
+(OS preemptions), favouring the median; on a loaded CI box the distribution is
+closer to uniform jitter, where the difference is negligible. The port keeps
+the median (oracle parity, source 100 even-n convention). **Closed by parity
+argument; re-open if the differential oracle disagrees.**
+
+---
+
+## Falsification section (cycle 7, pass 1 additions)
+
+### 63. The calibration gap is real
+
+**Claim:** Python `fitsproof` proves a calibrated error bar (held-out MAPE +
+bootstrap 95% CI over a train/held-out fit of `bandwidth_utilisation`); the
+Rust checker proves no error bar at all (default u = 0.6, no measurement path).
+
+**Falsifying observation:** A Rust code path exists that reads measurements,
+fits `u`, and prints held-out MAPE with an interval — i.e. `grep -ri "mape\|bootstrap\|held.out" src/` returns a real implementation, not a stub message.
+
+**Current status:** Not falsified. `src/` contains `probe.rs` (bandwidth/GEMM
+measurement) and `cost.rs` (default `u = 0.6` in `decode_tok_s`); no
+calibration, split, MAPE, or resampling symbol exists in the tree. The gap is
+confirmed at the file level. **CONFIRMED.**
+
+### 64. MAPE is the right held-out metric (actuals bounded away from zero)
+
+**Claim:** Measured tok/s actuals are strictly positive (guarded by the
+`measured_tok_s > 0` filter and the `nonzero` mask), so MAPE is always defined
+and scale-independence holds across configs.
+
+**Falsifying observation:** A real measurement run produces `measured_tok_s`
+at or near zero (stalled decode, sub-millisecond timing quantisation on a
+granularity-limited clock — cf. source 104) often enough that the mask drops
+>10% of held-out points, or an all-zero actuals vector yields NaN.
+
+**Current status:** Cannot be falsified until the Rust measurement path exists
+(implement pass). The fallback is recorded (source 105, MASE). **OPEN,
+fallback cited.**
+
+### 65. The percentile interval is an honest-enough uncertainty for v0.2 scope
+
+**Claim:** At the measurement counts the implement pass will require (OQ-C7-1),
+the first-order percentile interval (sources 93) labelled as such is an honest
+uncertainty; BCa (source 97) is deferred to n_held ≥ 20.
+
+**Falsifying observation:** Coverage simulation (seeded, on synthetic
+log-normal timing noise matched to real probe variance) shows the labelled
+percentile interval covering the true MAPE at <80% for the chosen minimum n —
+i.e. the label "95%" misleads even with the first-order caveat.
+
+**Current status:** Testable only after the implement pass builds the
+measurement path; the simulation recipe is specified here so the evaluate pass
+can run it. **OPEN with executable recipe.**
+
+### 66. Mean-of-ratios is the loss-consistent fit (not OLS)
+
+**Claim:** (Source 96 derivation.) The mean of implied utils minimises the
+squared-relative-error objective — the squared analogue of the reported MAPE —
+while absolute-error OLS would optimise a different loss than the one reported.
+
+**Falsifying observation:** Algebraic counterexample: a two-point dataset where
+the mean-of-ratios solution has *higher* Σ((y−ux)/y)² than the OLS solution.
+(No such dataset exists if the derivation holds; the claim is mathematical, so
+the "observation" is a derivation check the reviewer can run in closed form.)
+
+**Current status:** Derivation stated in source 96 entry; reviewer-verifiable
+without running code. The implement pass must carry a test asserting the fit
+equals `mean(measured·W/bw)` exactly (not approximately). **STATED, test
+prescribed.**
+
+---
+
+## Summary: what changed in cycle 7 pass 1
+
+| Item | Status | Core finding |
+|------|--------|--------------|
+| Calibration gap characterised | Done | Python fits u + reports held-out MAPE + bootstrap CI; Rust has default 0.6 and none of the path |
+| Sources 93–105 added (13 ≥ 10 required) | Done | 5 design-driving with full method/equations/assumptions/failure modes; 8 supporting |
+| All 13 links verified 2026-10-12 | Done | curl HTTP 200 (DOI redirects, NIST, NumPy, Python/Rust docs, Springer, sklearn, Hyndman PDF) |
+| Fit/metric pairing decided | Done | mean-of-ratios + MAPE stay paired (source 96); no OLS "upgrade" |
+| OQ-C7-1..3 opened | Open | min-n rule, Rust bootstrap RNG parity, median timing — for pass 3 / implement |
+| Falsification entries 63–66 | Done | gap reality, MAPE definedness, CI honesty, fit/metric pairing |
+
+---
+
+*Cycle 7, Pass 1 complete. Sources 93–105 added. All links verified 2026-10-12.
+Companion change: `docs/EVIDENCE.md` §56 records the cycle baseline
+(1/3 mutants killed = 33.3%, gate 70%, from `reports/mutation-c6.json`).
+Open questions OQ-C7-1..3 carry to pass 3.*

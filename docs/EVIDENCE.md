@@ -1737,3 +1737,52 @@ CLEAN
 - Mutation score: c5 cost.rs run: 25/25 caught (100%). c6-p08 fixed 23 main.rs mutants. plan.rs and admit.rs mutation run was the c6 mutation pass scope (separate lane).
 - All adoption-readiness credibility gaps addressed. No open blockers.
 - `verify` runs on reference bundle (random weights), not real models: v0.2 weight loader scope.
+
+---
+
+## 56. c7-p01-research-1: cycle baseline — cycle-6 mutation gate
+
+**Claim:** Cycle 7 works from the measured cycle-6 mutation baseline quoted exactly,
+not re-derived: 1/3 mutants killed = 33.3%. Gate: 70%.
+
+**Command:**
+```
+cat reports/mutation-c6.json
+```
+
+**Raw output:**
+```
+{
+  "cycle": 6,
+  "tool": "cargo-mutants",
+  "command": "/home/openclaw/.cargo/bin/cargo mutants --no-times --no-shuffle",
+  "rc": 124,
+  "killed": 1,
+  "total": 3,
+  "unviable": 1,
+  "kill_rate": 0.3333333333333333,
+  "score_raw": "1/3",
+  "target": 0.7,
+  "tail": [
+    "MISSED   src/main.rs:303:5: replace cmd_serve -> ExitCode with Default::default()",
+    "MISSED   src/main.rs:321:5: replace cmd_mcp -> ExitCode with Default::default()",
+    "MISSED   src/main.rs:338:35: replace * with + in cmd_pareto",
+    "MISSED   src/main.rs:338:35: replace * with / in cmd_pareto",
+    "MISSED   src/main.rs:362:40: replace * with + in cmd_stress",
+    "MISSED   src/main.rs:362:33: replace * with + in cmd_stress",
+    "MISSED   src/main.rs:464:32: replace && with || in cmd_stress",
+    "MISSED   src/main.rs:537:5: replace parse_context -> Result<Option<usize>, String> with Ok(None)",
+    "",
+    "TIMEOUT after 3600s — process group killed"
+  ],
+  "generated_at": 1790839858.6394522
+}
+```
+(tail abbreviated to the distinct operators; full verbatim content in `reports/mutation-c6.json`)
+
+**Status:** RECORDED — 1/3 mutants killed = 33.3%. Gate: 70%. Gap to gate: 36.7 points.
+The c6 run timed out after 3600s having exercised only 3 mutants (all in `src/main.rs`
+CLI dispatch/arithmetic); contract modules were not reached. Cycle 7 implement passes
+target only the research-backed gap (calibration); mutation-killing tests for the
+surviving operator classes land as a consequence of new `calibrate` KATs, not as a
+separate campaign.
