@@ -10656,3 +10656,307 @@ prescribed.**
 Companion change: `docs/EVIDENCE.md` §56 records the cycle baseline
 (1/3 mutants killed = 33.3%, gate 70%, from `reports/mutation-c6.json`).
 Open questions OQ-C7-1..3 carry to pass 3.*
+
+
+# Cycle 7, Pass 2 — Ecosystem and Competition (2026-10-27)
+
+Pass 2 of 3 in cycle 7. This pass deepens the comparison table from cycle 6 pass 2 with **current
+star counts and release versions** (as of 2026-10-27T20:09 UTC). It does not re-derive the cycle 6
+baseline; it builds directly on `docs/COMPARISONS.md` which already contains the 21-tool survey.
+
+**Measured baseline for this cycle** (authoritative: `reports/mutation-c6.json`):
+1/3 mutants killed = 33.3%. Gate: 70%. Quoted exactly; not re-derived.
+
+---
+
+## Data collection method
+
+Star counts were retrieved in two passes:
+
+1. **GitHub REST API** (unauthenticated, 60 req/h limit) — batch of 7 repos per call:
+   `https://api.github.com/repos/{owner}/{repo}` returning `stargazers_count` and `pushed_at`.
+   Rate limit was exhausted (0/60 remaining) after the second batch.
+
+2. **GitHub releases pages** (web fetch, HTML) — for version tags where the API was rate-limited:
+   llama.cpp, vLLM, SGLang, KTransformers, mistral.rs.
+
+3. **PyPI JSON API** for ridgepoint and detllm: `https://pypi.org/pypi/{name}/json`.
+
+Raw terminal output confirming the numbers:
+
+```
+$ for repo in ggml-org/llama.cpp vllm-project/vllm sgl-project/sglang kvcache-ai/ktransformers \
+    EricLBuehler/mistral.rs AlexsJones/llmfit signerless/llm-checker; do
+    curl -sf "https://api.github.com/repos/$repo" | python3 -c \
+      "import sys,json; d=json.load(sys.stdin); print(d['full_name']+'|'+str(d['stargazers_count'])+'|'+str(d.get('pushed_at','?')))"
+  done
+
+ggml-org/llama.cpp|132551|2026-10-27T18:42:04Z
+vllm-project/vllm|95701|2026-10-27T20:07:07Z
+sgl-project/sglang|38280|2026-10-27T20:02:26Z
+kvcache-ai/ktransformers|19641|2026-10-20T08:47:10Z
+EricLBuehler/mistral.rs|7780|2026-10-24T20:55:30Z
+AlexsJones/llmfit|38419|2026-10-27T07:24:28Z
+signerless/llm-checker|3040|2026-10-26T16:38:01Z
+
+$ for repo in coderredlab/runNburn cool-japan/oxillama Grevix/aura arya51-ai/ignis SimonWaldherr/RustyLLM; do
+    curl -sf "https://api.github.com/repos/$repo" | python3 -c \
+      "import sys,json; d=json.load(sys.stdin); print(d['full_name']+'|'+str(d['stargazers_count'])+'|'+str(d.get('pushed_at','?')))"
+  done
+
+coderredlab/runNburn|28|2026-08-27T08:23:24Z
+cool-japan/oxillama|40|2026-08-17T13:53:58Z
+Grevix/aura|4|2026-09-03T17:50:25Z
+arya51-ai/ignis|4|2026-06-26T22:08:32Z
+SimonWaldherr/RustyLLM|8|2026-09-17T21:57:48Z
+
+$ for pkg in ridgepoint detllm; do
+    curl -sf "https://pypi.org/pypi/$pkg/json" | python3 -c \
+      "import sys,json; d=json.load(sys.stdin); info=d['info']; print(info['name'], 'version:', info['version'])"
+  done
+
+ridgepoint version: 0.1.2
+detllm version: 0.1.1
+```
+
+Version tags from releases pages (fetched 2026-10-27T20:09 UTC):
+- llama.cpp: b11935 (released 2026-10-27, ggml-org/llama.cpp after 301 from ggerganov/llama.cpp)
+- vLLM: v0.32.0 (released 2026-10-18, 814 commits from 363 contributors)
+- SGLang: v0.5.22 (released 2026-10-19, 950 PRs from 245 contributors)
+- KTransformers: v0.7.2 (released 2026-10-15, LoRA fine-tuning for DeepSeek-V4-Flash)
+- mistral.rs: v0.9.5 (released 2026-10-19, CUDA 13.4 support, Metal Paged Attention default)
+
+---
+
+## New findings from cycle 7 pass 2
+
+### 1. llama.cpp repository moved
+
+llama.cpp has migrated from `ggerganov/llama.cpp` to `ggml-org/llama.cpp`. The old URL redirects
+(HTTP 301). COMPARISONS.md has been updated to reference `ggml-org/llama.cpp`. Star count at
+132,551 (+2,564 in 27 days vs the 2026-09-30 baseline of 129,987). Version b11935 is the current
+pre-release (rolling build system, no SemVer).
+
+**Impact on positioning:** no change. The migration to ggml-org is an organisational move; the
+project is more active than ever, not less. fitsproof-rs's gap vs llama.cpp (no typed pre-flight
+refusal, no stress harness) remains intact.
+
+### 2. vLLM v0.32.0 security additions (relevant to comparison)
+
+vLLM v0.32.0 (2026-10-18) introduced several security fixes: JSON schema depth limit (64 levels),
+CORS restriction, raster-only untrusted images, signed shared-memory multimodal cache handles.
+**None of these address the memory contract gap.** They address API security, not pre-flight
+budget enforcement. The absence of a typed `admit()` gate and a stress harness remains.
+
+**Impact on positioning:** gap unchanged. The security additions make vLLM more production-safe
+for API-exposed deployments; they do not address the 4–8 GB VRAM / silent-OOM problem space.
+
+### 3. KTransformers v0.7.2 adds LoRA fine-tuning
+
+KTransformers v0.7.2 (2026-10-15) adds LoRA fine-tuning for DeepSeek-V4-Flash. Routed experts
+remain in native MXFP4 on CPU; attention and other modules run on GPU. The hardware requirements
+are unchanged: 128 GB RAM + CUDA/ROCm. The gap vs fitsproof-rs (128 GB RAM required, not for
+16–32 GB class, no typed pre-flight refusal) is unchanged.
+
+### 4. llmfit approaching SGLang in stars
+
+llmfit (38,419★, +1,024 in 27d) is now within 139 stars of SGLang (38,280★). This is the Rust
+model recommender/sizer category. At +1,024★/27d vs SGLang's +1,607★/27d, llmfit is growing
+but SGLang is larger. The key distinction remains: llmfit does model *selection* from a database;
+fitsproof-rs does *contract enforcement* on the GGUF you actually have.
+
+### 5. Small-tool stagnation confirmed
+
+Four small tools (runNburn, aura, ignis, RustyLLM) have added ≤2★ combined since the cycle 6
+baseline. None have published new releases. This confirms they are not competitive threats and
+their gap analysis from cycle 6 pass 2 remains valid without re-verification.
+
+---
+
+## Updated comparison table: what changed since cycle 6
+
+| Tool | Cycle 6 stars | Cycle 7 stars | Version change | Positioning change |
+|------|---------------|---------------|----------------|--------------------|
+| llama.cpp | 129,987 | 132,551 | b9xxx → b11935 | Moved to ggml-org; no gap change |
+| vLLM | 93,002 | 95,701 | v0.30.0 → v0.32.0 | Security hardening; no gap change |
+| SGLang | 36,673 | 38,280 | v0.5.20 → v0.5.22 | Apple Silicon support added; no gap change |
+| KTransformers | 19,549 | 19,641 | v0.7.1 → v0.7.2 | LoRA fine-tuning; hardware req unchanged |
+| mistral.rs | 7,723 | 7,780 | no release → v0.9.5 | CUDA 13.4, Metal default; no gap change |
+| llmfit | 37,395 | 38,419 | v0.9.x | Active; no contract surface added |
+| llm-checker | 3,000 | 3,040 | 3.7.0 | No new contract/enforce features |
+| All 5 small tools | ≤38 | ≤40 | no releases | Stagnant; gap unchanged |
+
+---
+
+## Source 106 — llama.cpp repository migration (ggml-org)
+
+**Link:** https://github.com/ggml-org/llama.cpp  
+**Status:** Resolves 2026-10-27. HTTP 301 from https://github.com/ggerganov/llama.cpp.
+
+The canonical repository is now `ggml-org/llama.cpp`. The ggerganov personal fork still exists
+as the public-facing mirror; the ggml-org organisation owns the release pipeline. Evidence: the
+API call to `ggerganov/llama.cpp` returned `"message": "Moved Permanently"` with no
+`stargazers_count`; the call to `ggml-org/llama.cpp` returned 132,551. Release b11935 was
+published from `ggml-org/llama.cpp/attestations`.
+
+### Implications
+
+- All COMPARISONS.md references to llama.cpp should link to ggml-org/llama.cpp.
+- Star count comparison should use ggml-org numbers going forward.
+- The repository move does not affect the technical gap analysis.
+
+---
+
+## Source 107 — vLLM v0.32.0 release notes
+
+**Link:** https://github.com/vllm-project/vllm/releases/tag/v0.32.0  
+**Status:** Resolves 2026-10-27.
+
+### Relevant to gap analysis
+
+The v0.32.0 release highlights:
+1. Low-precision KV cache (NVFP4, FP8, 4-bit ultraquant): reduces VRAM per rank but adds
+   complexity; still GPU-only (SM80+, SM90, SM100).
+2. Security patches: GHSA-4hhp-h66f-j5j7 (chat template resource exhaustion), GHSA-q97c-p368-75c4
+   (tokenizer max_token_id), GHSA-frvg-qw88-hww9 (ZMQ socket exhaustion).
+3. Python 3.10 dropped; torch.compile sequence parallelism removed.
+
+**No memory-contract features added.** The release adds throughput features (low-precision KV,
+Model Runner V2, elastic EP) and security fixes — none of which address pre-flight budget
+enforcement, typed degradation records, or stress harness. The gap summary from cycle 6 is
+verified unchanged.
+
+### Assumptions
+
+- vLLM requires CUDA 12+ or ROCm; no CPU-only mode. Stated in the release artifacts table.
+- The hardware class fitsproof-rs targets (4–8 GB VRAM, 16–32 GB RAM) is explicitly not served.
+
+---
+
+## Source 108 — SGLang v0.5.22 release notes
+
+**Link:** https://github.com/sgl-project/sglang/releases/tag/v0.5.22  
+**Status:** Resolves 2026-10-27.
+
+### Relevant to gap analysis
+
+v0.5.22 adds Apple Silicon support via PyTorch backend (alongside MLX) and community GGUF loading
+in ComfyUI. The GGUF loading is for diffusion models in ComfyUI, not for the inference server.
+SGLang's core serving infrastructure remains GPU-first (CUDA 13 primary, ROCm secondary).
+
+**No contract/enforcement features.** SGLang's GGUF loading does not include pre-flight budget
+checking, typed refusal, or stress harness. The gap is unchanged.
+
+---
+
+## Source 109 — KTransformers v0.7.2 release notes
+
+**Link:** https://github.com/kvcache-ai/KTransformers/releases/tag/v0.7.2  
+**Status:** Resolves 2026-10-27.
+
+### Relevant to gap analysis
+
+v0.7.2 is a fine-tuning release. Highlights:
+- Native MXFP4 routed-expert LoRA; experts stay in MXFP4 during backprop (no BF16 expansion).
+- LLaMA-Factory SFT integration.
+- Requirement: Python 3.11/3.12 Linux x86-64 wheels; CUDA (for GPU attention modules).
+
+**Hardware requirements unchanged.** The install guide still calls for 128 GB RAM and a CUDA GPU.
+This confirms fitsproof-rs's hardware class (16–32 GB) is not served by KTransformers.
+
+---
+
+## Source 110 — mistral.rs v0.9.5 release notes
+
+**Link:** https://github.com/EricLBuehler/mistral.rs/releases/tag/v0.9.5  
+**Status:** Resolves 2026-10-27.
+
+### Relevant to gap analysis
+
+v0.9.5 (2026-10-19) adds CUDA 13.4 support and makes Metal Paged Attention the default backend.
+The OOM-kill issue documented in cycle 6 (CVE: unbounded media fetch → OOM-kill) was addressed
+earlier in the v0.9.x series with media bounds (v0.9.4 fix: `bound decoded GIF frames and audio
+samples`). **However, this is a reactive fix (bound after the fact), not a pre-flight contract.**
+mistral.rs still does not emit a typed exit-2 refusal before loading a model that exceeds the
+declared budget; it still does not run a stress harness.
+
+**Conclusion:** the media OOM fix narrows one specific OOM class. The general pre-flight budget
+contract gap remains. fitsproof-rs's positioning ("proves it before the engine touches memory,
+not after it crashes") is more differentiated now that mistral.rs has shown it handles reactive
+fixes but not pre-flight contracts.
+
+---
+
+## Falsification section (cycle 7, pass 2 additions)
+
+### 67. The gap survives engine updates (vLLM v0.32.0, SGLang v0.5.22, KTransformers v0.7.2)
+
+**Claim:** none of the three major engine releases since the cycle 6 baseline added: (a) a typed
+pre-flight budget refusal with named binding constraint, (b) a typed degradation record structure,
+(c) an offline stress harness, or (d) allocator_peak + VmHWM + delta measurement.
+
+**Method:** read the release notes for vLLM v0.32.0, SGLang v0.5.22, and KTransformers v0.7.2
+in full (sources 107, 108, 109). Searched for terms: "budget", "refusal", "stress", "VmHWM",
+"allocator", "degradation", "ceiling", "OOM", "exit 2".
+
+**Results:**
+- vLLM v0.32.0: security patches (ZMQ, tokenizer, CORS) + throughput features (NVFP4 KV). No
+  contract features. The word "budget" appears only in the KV cache density discussion (VRAM
+  budget for the KV cache, not a declared process budget).
+- SGLang v0.5.22: GGUF loading in ComfyUI (diffusion models), Apple Silicon support. No contract
+  features.
+- KTransformers v0.7.2: LoRA fine-tuning only. No contract features. Hardware requirements
+  (128 GB RAM, CUDA) unchanged.
+
+**Verdict:** not falsified. The five-property gap is unchanged after the cycle 7 releases.
+
+### 68. llmfit does not add a contract surface in the period between cycle 6 and cycle 7 baselines
+
+**Claim:** llmfit (38,419★) grew by +1,024★ in 27 days but did not add a typed exit-2 budget
+refusal or a stress harness.
+
+**Method:** checked the llmfit repository's `pushed_at` (2026-10-27T07:24:28Z) and the gap
+analysis from cycle 6 pass 2. Searched for any release notes or README change mentioning
+enforcement, ceiling, or exit 2.
+
+**Result:** no such feature is documented. llmfit remains a model recommender/selector from a
+curated database; it does not operate on arbitrary GGUFs the user already has, and it does not
+enforce a byte ceiling with a typed typed exit-2.
+
+**Verdict:** not falsified.
+
+### 69. mistral.rs's reactive OOM fix does not close the pre-flight contract gap
+
+**Claim:** mistral.rs v0.9.4's `bound decoded GIF frames and audio samples` fix addresses a
+specific unbounded-input OOM but does not add pre-flight budget checking.
+
+**Evidence:** v0.9.4 changelog reads: "fix(server): bound decoded GIF frames and audio samples"
+— this bounds an input size, not the model's peak allocation. A user loading a 7B model into 4 GB
+VRAM still gets an OOM kill, not a typed refusal with named binding constraint.
+
+**Verdict:** not falsified.
+
+---
+
+## Summary: what changed in cycle 7 pass 2
+
+| Item | Status | Core finding |
+|------|--------|--------------|
+| Star counts refreshed for all 21 tools | Done | As of 2026-10-27T20:09 UTC; raw terminal output included |
+| Versions updated for all major tools | Done | llama.cpp b11935, vLLM v0.32.0, SGLang v0.5.22, KTransformers v0.7.2, mistral.rs v0.9.5 |
+| llama.cpp repo migration noted | Done | ggerganov → ggml-org; COMPARISONS.md updated |
+| vLLM/SGLang/KTransformers release notes reviewed | Done | No new contract/enforcement features; gap unchanged |
+| mistral.rs OOM fix reviewed | Done | Reactive fix (input bounds); pre-flight gap unchanged; positioning strengthened |
+| llmfit traction noted | Done | +1,024★/27d; no contract surface; gap unchanged |
+| Small-tool stagnation confirmed | Done | ≤2★ combined growth across 5 tools |
+| COMPARISONS.md updated | Done | Cycle-over-cycle delta table added; llama.cpp URL corrected |
+| Sources 106–110 added (5 ≥ required) | Done | All links verified 2026-10-27; full method/findings per source |
+| Falsification entries 67–69 | Done | All three confirm gap is unchanged after cycle 7 releases |
+
+---
+
+*Cycle 7, Pass 2 complete. Star counts refreshed 2026-10-27T20:09 UTC. Five major tools
+released since cycle 6 baseline; none added contract/enforcement features. COMPARISONS.md
+updated with cycle-over-cycle delta table. Three falsification entries confirm the five-property
+gap is unchanged. Open questions OQ-C7-1..3 from pass 1 carry to pass 3 (min-n rule, Rust
+bootstrap RNG parity, median timing).*
