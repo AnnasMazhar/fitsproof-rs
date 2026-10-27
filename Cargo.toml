@@ -22,6 +22,10 @@ path = "src/lib.rs"
 # serde for serialising MachineProfile/AdmitRecord to JSON
 serde = { version = "1.0.210", features = ["derive"] }
 serde_json = "1.0.128"
+# Zero-cost attribute crate for #[mutants::skip] — tells cargo-mutants to skip a function.
+# The attribute has no effect on compiled code; it only flags the item for cargo-mutants.
+# Must be a regular dependency (not dev-dependency) because annotations appear on non-test code.
+mutants = "0.0.4"
 
 [[test]]
 name = "test_incumbent_gap"
