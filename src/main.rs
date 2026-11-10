@@ -117,7 +117,7 @@ fn cmd_plan(args: &[String]) -> ExitCode {
     };
 
     let machine = synthetic_machine_or_probe();
-    let budget_bytes = (budget_gb * 1e9) as u64;
+    let budget_bytes = budget_gb_to_bytes(budget_gb);
 
     match plan(&cfg, &machine, context_len, budget_bytes, &quant, 0.6) {
         Ok(p) => {
@@ -172,7 +172,7 @@ fn cmd_admit(args: &[String]) -> ExitCode {
     };
 
     let machine = synthetic_machine_or_probe();
-    let budget_bytes = (budget_gb * 1e9) as u64;
+    let budget_bytes = budget_gb_to_bytes(budget_gb);
 
     match plan(&cfg, &machine, context_len, budget_bytes, &quant, 0.6) {
         Ok(p) => {
@@ -206,7 +206,7 @@ fn cmd_verify(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let budget_bytes = (budget_gb * 1e9) as u64;
+    let budget_bytes = budget_gb_to_bytes(budget_gb);
     let quant = parse_flag(args, "--quant").unwrap_or_else(|| "none".to_string());
     let context_len: usize = match parse_context(args) {
         Ok(Some(v)) => v,
@@ -324,6 +324,17 @@ fn cmd_verify(args: &[String]) -> ExitCode {
 // serve
 // ---------------------------------------------------------------------------
 
+/// Fault detected by: `serve_binds_port_and_responds`, `serve_refused_budget_returns_503_binary`,
+/// `serve_admitted_response_has_admission_record_binary` in tests/cmd_integration.rs.
+///
+/// Body-replacement mutant (`Default::default()` instead of the real ExitCode) causes
+/// `run_server()` to never be called → TCP port never bound → connect fails.
+///
+/// Skipped from cargo-mutants fast suite: the mutations here require spawning the binary
+/// and sending HTTP requests (binary integration tests, not unit tests). They are fully
+/// covered by cmd_integration.rs. Running cmd_integration per mutant takes ~230 s —
+/// prohibitive for a 60 s/mutant budget.
+#[mutants::skip]
 fn cmd_serve(args: &[String]) -> ExitCode {
     let port: u16 = parse_flag(args, "--port")
         .and_then(|s| s.parse().ok())
@@ -342,6 +353,15 @@ fn cmd_serve(args: &[String]) -> ExitCode {
 // mcp
 // ---------------------------------------------------------------------------
 
+/// Fault detected by: `mcp_responds_to_initialize`, `mcp_tools_call_admit_admitted_binary`,
+/// `mcp_tools_call_admit_refused_binary` in tests/cmd_integration.rs.
+///
+/// Body-replacement mutant (`Default::default()`) causes `run_stdio()` to never be called
+/// → stdin/stdout MCP protocol never executed → empty stdout → test fails.
+///
+/// Skipped from cargo-mutants fast suite: same reason as cmd_serve — requires binary spawn
+/// and stdin/stdout I/O; cmd_integration.rs covers it fully.
+#[mutants::skip]
 fn cmd_mcp() -> ExitCode {
     fitsproof::mcp::run_stdio();
     ExitCode::SUCCESS
@@ -360,7 +380,7 @@ fn cmd_pareto(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let budget_bytes = (budget_gb * 1e9) as u64;
+    let budget_bytes = budget_gb_to_bytes(budget_gb);
     let cfg = ModelConfig::reference();
     let machine = synthetic_machine_or_probe();
     let result = fitsproof::pareto::pareto_sweep(&cfg, &machine, budget_bytes);
@@ -390,9 +410,7 @@ fn cmd_stress() -> ExitCode {
     };
     let ref_cfg = ModelConfig::reference();
 
-    let fp32_peak = fitsproof::cost::weight_bytes(&ref_cfg, "none")
-        + fitsproof::cost::kv_cache_bytes(&ref_cfg, 512, "fp16")
-        + fitsproof::cost::activation_bytes(&ref_cfg);
+    let fp32_peak = stress_fp32_peak(&ref_cfg);
 
     // 25 configurations.
     let specs: Vec<(&str, &str, usize, u64)> = vec![
@@ -442,10 +460,7 @@ fn cmd_stress() -> ExitCode {
 
         // F4: use effective quant/context from degradation.
         let (eff_quant, eff_context) = effective_config(&rec, quant, *context_len);
-        let eff_budget = match &rec.applied_degradation {
-            Some(step) => step.predicted_peak_bytes * 4,
-            None => *budget,
-        };
+        let eff_budget = stress_eff_budget(rec.applied_degradation.as_ref(), *budget);
 
         // F1: install ceiling before the run.
         fitsproof::ALLOCATOR.set_ceiling(eff_budget);
@@ -649,6 +664,64 @@ fn load_model_config(args: &[String], subcommand: &str) -> Result<ModelConfig, E
                 }
             }
         }
+    }
+}
+
+/// Convert a budget in GB (f64) to bytes (u64) for the contract enforcement path.
+///
+/// This is the canonical `budget_gb * 1e9` conversion, extracted so that cargo-mutants
+/// can kill the `* → +` and `* → /` mutations in a single fast unit test rather than
+/// requiring a binary integration test per call site.
+///
+/// # Fault index
+///
+/// | Test | Fault detected |
+/// |------|----------------|
+/// | `budget_gb_to_bytes_4gb` | `* 1e9` → `+ 1e9` → 4 + 1e9 bytes (~1 GB) instead of 4 GB. |
+/// | `budget_gb_to_bytes_4gb` | `* 1e9` → `/ 1e9` → effectively 0 bytes (f64 truncation). |
+/// | `budget_gb_to_bytes_scaling` | Linear scaling: 2 GB → exactly 2× 1 GB in bytes. |
+fn budget_gb_to_bytes(budget_gb: f64) -> u64 {
+    (budget_gb * 1e9) as u64
+}
+
+/// Compute the fp32 peak bytes for the reference model at 512 context.
+///
+/// Extracted from cmd_stress so the `+` operators in the sum can be killed by unit tests
+/// rather than requiring binary integration tests. The three operands are weight_bytes
+/// (fp32), kv_cache_bytes (fp16 at ctx512), and activation_bytes.
+///
+/// # Fault index
+///
+/// | Test | Fault detected |
+/// |------|----------------|
+/// | `stress_fp32_peak_value_exact` | Any `+` → `*` or `+` → `-` mutation produces wrong total. |
+/// | `stress_fp32_peak_value_exact` | Function replaced with `0` → peak is 0 → fp32_peak-1 wraps. |
+fn stress_fp32_peak(cfg: &ModelConfig) -> u64 {
+    fitsproof::cost::weight_bytes(cfg, "none")
+        + fitsproof::cost::kv_cache_bytes(cfg, 512, "fp16")
+        + fitsproof::cost::activation_bytes(cfg)
+}
+
+/// Compute the effective budget for a degraded config in the stress harness.
+///
+/// When a degradation was applied, the ceiling is set to 4× the degraded predicted peak
+/// to give enough headroom for OS overhead and the Rust binary's own allocations.
+/// Extracted so the `* 4` operator can be killed by a unit test.
+///
+/// # Fault index
+///
+/// | Test | Fault detected |
+/// |------|----------------|
+/// | `stress_eff_budget_degraded_is_4x_peak` | `* 4` → `+ 4` → budget too tight, verify violations. |
+/// | `stress_eff_budget_degraded_is_4x_peak` | `* 4` → `/ 4` → budget ¼ of peak, definitely violated. |
+/// | `stress_eff_budget_pass_through` | No degradation → budget unchanged from original spec. |
+fn stress_eff_budget(
+    applied_degradation: Option<&fitsproof::plan::DegradationStep>,
+    budget: u64,
+) -> u64 {
+    match applied_degradation {
+        Some(step) => step.predicted_peak_bytes * 4,
+        None => budget,
     }
 }
 
@@ -983,5 +1056,220 @@ mod tests {
             "three violated records; = 1 mutation would give 1 not 3"
         );
         assert_eq!(silent_changes, 1, "one silent change");
+    }
+
+    // ── parse_context ─────────────────────────────────────────────────────────
+    // These tests kill the 3 surviving parse_context mutants from mutation-c6:
+    //   replace parse_context -> Result<Option<usize>, String> with Ok(None)
+    //   replace parse_context -> Result<Option<usize>, String> with Ok(Some(0))
+    //   replace parse_context -> Result<Option<usize>, String> with Ok(Some(1))
+
+    use super::parse_context;
+
+    /// Fault: Function replaced with `Ok(None)` — flag present but value ignored.
+    /// Also kills: `args[i] == "--context"` changed to `!=` (flag never found → None).
+    #[test]
+    fn parse_context_valid_returns_some() {
+        let args: Vec<String> = vec!["--context".into(), "512".into()];
+        let result = parse_context(&args);
+        assert_eq!(
+            result,
+            Ok(Some(512)),
+            "valid --context 512 must return Ok(Some(512))"
+        );
+    }
+
+    /// Fault: Function replaced with `Ok(Some(0))` — always returns zero.
+    /// Zero is rejected by the guard `v > 0`, so if Ok(Some(0)) were returned, callers
+    /// would fail immediately. But this test asserts the positive case returns the correct
+    /// value, so a constant-0 replacement fails.
+    #[test]
+    fn parse_context_value_is_exact() {
+        let args: Vec<String> = vec!["--context".into(), "4096".into()];
+        let result = parse_context(&args);
+        assert_eq!(
+            result,
+            Ok(Some(4096)),
+            "--context 4096 must return exactly Ok(Some(4096))"
+        );
+    }
+
+    /// Fault: Function replaced with `Ok(Some(1))` — always returns 1.
+    /// A value of 1 is technically valid (> 0), so this mutant wouldn't cause an error
+    /// in callers that use the value. This test verifies the exact value 256 is returned
+    /// when 256 is supplied — distinguishing from the constant-1 replacement.
+    #[test]
+    fn parse_context_value_is_not_constant_one() {
+        let args: Vec<String> = vec!["--context".into(), "256".into()];
+        let result = parse_context(&args);
+        assert_eq!(
+            result,
+            Ok(Some(256)),
+            "--context 256 must return Ok(Some(256)), not Ok(Some(1))"
+        );
+    }
+
+    /// Fault: Function replaced with `Ok(Some(1))` — always returns 1 regardless of absence.
+    /// If the flag is absent, Ok(None) must be returned (not Ok(Some(1))).
+    #[test]
+    fn parse_context_absent_returns_none() {
+        let args: Vec<String> = vec!["--budget-gb".into(), "4.0".into()];
+        let result = parse_context(&args);
+        assert_eq!(result, Ok(None), "absent --context must return Ok(None)");
+    }
+
+    /// Fault: Guard `v > 0` replaced with `true` — zero context accepted as valid.
+    /// Zero context is nonsensical (no KV cache).
+    #[test]
+    fn parse_context_zero_returns_err() {
+        let args: Vec<String> = vec!["--context".into(), "0".into()];
+        assert!(
+            parse_context(&args).is_err(),
+            "--context 0 must return Err (zero is not a valid context length)"
+        );
+    }
+
+    /// Fault: Function replaced with `Ok(None)` — non-integer silently accepted as absent.
+    #[test]
+    fn parse_context_nonnumeric_returns_err() {
+        let args: Vec<String> = vec!["--context".into(), "notanumber".into()];
+        assert!(
+            parse_context(&args).is_err(),
+            "--context notanumber must return Err"
+        );
+    }
+
+    // ── budget_gb_to_bytes ───────────────────────────────────────────────────
+    // These tests kill the `* 1e9` → `+ 1e9` and `* 1e9` → `/ 1e9` mutants
+    // in budget_gb_to_bytes, which propagate to cmd_plan, cmd_admit, cmd_verify,
+    // and cmd_pareto (all call budget_gb_to_bytes).
+
+    use super::budget_gb_to_bytes;
+
+    /// Fault: `* 1e9` → `+ 1e9`: 4 + 1e9 = 1_000_000_004 (≈1 GB) instead of 4_000_000_000 (4 GB).
+    /// Fault: `* 1e9` → `/ 1e9`: (4 / 1e9) as u64 = 0 (truncation to zero bytes).
+    #[test]
+    fn budget_gb_to_bytes_4gb() {
+        let result = budget_gb_to_bytes(4.0);
+        assert_eq!(
+            result, 4_000_000_000u64,
+            "4.0 GB must convert to 4_000_000_000 bytes; \
+             * 1e9 → + 1e9 gives 1_000_000_004; * 1e9 → / 1e9 gives 0"
+        );
+    }
+
+    /// Fault: Non-linear scaling would indicate the operator was changed.
+    /// 2 GB must be exactly 2_000_000_000 bytes, half of 4 GB.
+    #[test]
+    fn budget_gb_to_bytes_scaling_linear() {
+        let gb2 = budget_gb_to_bytes(2.0);
+        let gb4 = budget_gb_to_bytes(4.0);
+        assert_eq!(gb2, 2_000_000_000u64, "2.0 GB must be 2_000_000_000 bytes");
+        assert_eq!(
+            gb4,
+            gb2 * 2,
+            "4 GB must be exactly 2× 2 GB in bytes (linear scaling)"
+        );
+    }
+
+    /// Fault: Small budget (0.1 GB = 100 MB) must not round to zero.
+    /// With `/ 1e9`, (0.1 / 1e9) = 1e-10, which truncates to 0.
+    #[test]
+    fn budget_gb_to_bytes_small_budget_nonzero() {
+        let result = budget_gb_to_bytes(0.1);
+        assert_eq!(
+            result, 100_000_000u64,
+            "0.1 GB must be 100_000_000 bytes (not zero from / 1e9 mutant)"
+        );
+    }
+
+    // ── stress_fp32_peak ─────────────────────────────────────────────────────
+    // Kills `+` → `*` and `+` → `-` mutants in the fp32_peak sum inside cmd_stress.
+
+    use super::stress_fp32_peak;
+    use fitsproof::model::ModelConfig;
+
+    /// Fault: Any `+` → `*` mutation produces weight * kv_cache * activation (astronomical).
+    /// Fault: Any `+` → `-` mutation produces weight - kv_cache - activation (may underflow).
+    /// Fault: Function replaced with `0` → fp32_peak = 0 → fp32_peak - 1 wraps to u64::MAX.
+    #[test]
+    fn stress_fp32_peak_value_exact() {
+        let cfg = ModelConfig::reference();
+        // Known values from the reference bundle (also verified in contract_mutants.rs):
+        // weight_bytes(fp32) = 53_497_344
+        // kv_cache_bytes(fp16, ctx512) = 1_572_864
+        // activation_bytes = 9_216
+        // sum = 55_079_424
+        let expected = fitsproof::cost::weight_bytes(&cfg, "none")
+            + fitsproof::cost::kv_cache_bytes(&cfg, 512, "fp16")
+            + fitsproof::cost::activation_bytes(&cfg);
+        let result = stress_fp32_peak(&cfg);
+        assert_eq!(
+            result, expected,
+            "stress_fp32_peak must equal the sum of weight+kv+activation"
+        );
+        // Also verify the absolute value so a constant-replacement is caught.
+        assert_eq!(
+            result, 55_079_424u64,
+            "stress_fp32_peak for reference bundle must be 55_079_424 bytes"
+        );
+        assert!(
+            result > 0,
+            "stress_fp32_peak must be nonzero (function-body→0 mutant)"
+        );
+    }
+
+    // ── stress_eff_budget ────────────────────────────────────────────────────
+    // Kills `* 4` → `+ 4` and `* 4` → `/ 4` mutants in stress_eff_budget.
+
+    use super::stress_eff_budget;
+    use fitsproof::plan::DegradationKind;
+    use fitsproof::plan::DegradationStep;
+
+    fn make_degradation_step(predicted_peak_bytes: u64) -> DegradationStep {
+        DegradationStep {
+            kind: DegradationKind::LowerQuant,
+            description: "Test degradation".into(),
+            predicted_peak_bytes,
+            predicted_tok_s: 100.0,
+            fits_budget: true,
+        }
+    }
+
+    /// Fault: `* 4` → `+ 4`: 1_000_000 + 4 = 1_000_004 instead of 4_000_000.
+    /// Fault: `* 4` → `/ 4`: 1_000_000 / 4 = 250_000 instead of 4_000_000.
+    #[test]
+    fn stress_eff_budget_degraded_is_4x_peak() {
+        let step = make_degradation_step(1_000_000);
+        let result = stress_eff_budget(Some(&step), 999_999_999);
+        assert_eq!(
+            result, 4_000_000u64,
+            "eff_budget with degradation must be 4 × predicted_peak_bytes = 4_000_000; \
+             + 4 mutant gives 1_000_004; / 4 mutant gives 250_000"
+        );
+    }
+
+    /// Fault: Function returns Some branch value even when None is passed (branch condition dropped).
+    #[test]
+    fn stress_eff_budget_pass_through_none() {
+        let original_budget = 500_000_000u64;
+        let result = stress_eff_budget(None, original_budget);
+        assert_eq!(
+            result, original_budget,
+            "eff_budget without degradation must pass through the original budget unchanged"
+        );
+    }
+
+    /// Fault: `4` literal changed to different constant in `* 4`.
+    /// With 2× predicted_peak vs 4× predicted_peak: different result.
+    #[test]
+    fn stress_eff_budget_multiplier_is_exactly_4() {
+        let predicted = 10_000_000u64;
+        let step = make_degradation_step(predicted);
+        let result = stress_eff_budget(Some(&step), 0);
+        assert_eq!(
+            result, 40_000_000u64,
+            "multiplier must be exactly 4; constant 2 gives 20_000_000, constant 8 gives 80_000_000"
+        );
     }
 }

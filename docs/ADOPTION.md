@@ -1550,3 +1550,227 @@ Two lines of shell script. No configuration file. No new runtime. No Python. No 
 ---
 
 *Cycle 6 additions written 2026-09-30. Sources: §80 (Chen 2026, bandwidth utilisation), §81 (Zhang 2026, dual-budget), §82 (Banerjee 2026, two-constant MAPE), §83 (Das 2026, MCAP per-layer degradation), §85 (2026, corrected bpw table), §86 (2026, Silicon Showdown — OOM failure rate), §87 (2026, sustained bandwidth), §89 (Calver 2026, KV fallback bounds).*
+
+---
+
+## 17. Cycle 7 additions — calibration gap, concrete llmfit integration, and updated non-adoption reason
+
+### 17.1 — The calibration gap and what it means operationally
+
+**The gap (cycle 7, pass 1 characterisation):**
+
+Python `fitsproof` ships a `calibrate` module that fits `bandwidth_utilisation` from
+on-device measurements, splits measurements into train/held-out, and reports held-out MAPE
+plus a bootstrap 95% CI.  The Rust port does not: it hardcodes `u = 0.6` with no measurement
+path, no split, no MAPE, no interval.
+
+**What this means in practice:**
+
+`fitsproof plan` prints `decode_tok_s: 10.3 tok/s`.  On this machine, with this model, the
+number is unverified.  It is a formula evaluation, not a calibrated measurement.  The user
+has no way to know whether the prediction is 5% off or 40% off without running inference and
+measuring manually.
+
+The Python edition would print:
+```
+decode_tok_s: 10.3 tok/s  (held-out MAPE: 8.4% ± 3.1 pp, 95% CI)
+bandwidth_utilisation: 0.68  (fitted from 6 measurements, train MAPE: 6.1%)
+```
+
+The Rust edition prints:
+```
+decode_tok_s: 10.3 tok/s  (bandwidth_utilisation: 0.6, default, uncalibrated)
+```
+
+**Operational consequence:** When using fitsproof-rs v0.1 to plan throughput:
+- Trust the byte predictions (weight_bytes, kv_cache_bytes) — these are deterministic formulas
+  with no calibration dependency.
+- Treat tok/s predictions as rough estimates: ±25–40% is realistic before calibration.
+- For SLA planning or latency-sensitive deployments, measure actual tok/s independently and
+  do not use the plan output as a hard number.
+
+**The bytes-based enforcement is unaffected:** `admit()`, `refuse()`, and `stress` all enforce
+byte ceilings.  Calibration only affects the tok/s advisory output.
+
+### 17.2 — Concrete integration recipe: fitsproof-rs + llmfit
+
+**Scenario:** A team uses llmfit to discover which models fit their hardware and wants to add
+fitsproof-rs as a contract gate in their CI pipeline for the specific GGUF they download and run.
+llmfit recommends from a database; fitsproof-rs enforces against the actual file.
+
+**Full recipe (all commands tested against v0.1 binary):**
+
+```bash
+#!/usr/bin/env bash
+# Full workflow: model discovery (llmfit) + contract gate (fitsproof-rs)
+set -euo pipefail
+
+BUDGET_GB=13.6   # 85% of 16 GB RAM
+
+# Step 1: llmfit selects the best model family for this hardware
+# (llmfit recommend exits 0 regardless of fit status — use it for discovery only)
+RECOMMENDED=$(llmfit recommend --use-case coding --json \
+  | jq -r '.models[0].huggingface_id // .models[0].name')
+echo "llmfit recommends: $RECOMMENDED"
+
+# Step 2: Download the specific GGUF (Qwen3-7B-Instruct-Q4_K_M shown as example)
+# llmfit names the model family; the exact GGUF path is your deployment artifact
+GGUF_PATH="$HOME/models/Qwen3-7B-Instruct-Q4_K_M.gguf"
+
+# Step 3: fitsproof pre-flight — contract enforcement on the actual file
+# This exits 2 if the model doesn't fit, naming weight/kv/activation as the constraint
+./fitsproof admit \
+  --model "$GGUF_PATH" \
+  --quant q4_k_m \
+  --context 4096 \
+  --budget-gb "$BUDGET_GB" \
+|| {
+  echo "REFUSED: see binding constraint above; adjust --context or --quant"
+  exit 2
+}
+
+# Step 4: optional — see the Pareto frontier (v0.2; exits 2 with message in v0.1)
+# ./fitsproof pareto --model "$GGUF_PATH" --budget-gb "$BUDGET_GB"
+
+# Step 5: your inference invocation — only reached after pre-flight passes
+llama-cli -m "$GGUF_PATH" -c 4096 -n 200 -p "Your prompt"
+```
+
+**What each step adds:**
+
+| Step | Tool | Time | What it proves |
+|---|---|---|---|
+| Step 1 | llmfit | ~1s | Which model family fits the hardware class (database lookup) |
+| Step 3 | fitsproof admit | <50 ms | Whether this specific GGUF + quant + context fits the declared budget |
+| Step 5 | llama-cli | N/A | Actual inference |
+
+llmfit and fitsproof-rs answer different questions.  llmfit says "here is the right model
+family for your use case and hardware."  fitsproof-rs says "will this exact file, at this
+quant, at this context, fit in this budget — and fails loudly if not, before loading starts."
+
+**llmfit's dynamic quant walk vs fitsproof-rs's typed degradation:**
+
+llmfit walks Q8_0 → Q4_K_M → Q2_K silently and picks the best-quality quant that fits.
+fitsproof-rs emits a `FitsWithDegradation` typed record when a quant step-down was needed:
+
+```
+fitsproof admit --model 7b.gguf --quant q8_0 --context 4096 --budget-gb 8
+→ FITS WITH DEGRADATION: degraded quant from q8_0 → q4_k_m to meet 8.0 GB budget
+  degradation_steps: [{reason: weight_bytes_exceeded, from: q8_0, to: q4_k_m, bytes_saved: 3.5 GB}]
+exit: 0
+```
+
+A CI step can assert the degradation:
+```bash
+RESULT=$(./fitsproof admit --model 7b.gguf --quant q8_0 --context 4096 --budget-gb 8 --json)
+VERDICT=$(echo "$RESULT" | jq -r '.verdict')
+if [ "$VERDICT" = "fits_with_degradation" ]; then
+  CONSTRAINT=$(echo "$RESULT" | jq -r '.degradation_steps[0].reason')
+  echo "WARNING: degraded because of $CONSTRAINT — update your model quant default"
+fi
+```
+
+This is the gap that llmfit's silent walk cannot fill: a typed degradation record for CI
+auditing and pipeline governance.
+
+### 17.3 — Production failure modes unique to cycle 7
+
+These supplement §3 (cycle 1) and §8 (cycle 2).  They arise from the calibration gap
+characterised in cycle 7 pass 1.
+
+**Failure mode: tok/s SLA miss from uncalibrated u (Medium likelihood, Low severity)**
+
+A team sets an inference latency SLA (e.g. "must deliver ≥ 8 tok/s").  They run
+`fitsproof plan --model 7b.gguf --budget-gb 8` and see `decode_tok_s: 12.4 tok/s`.
+They deploy.  Actual sustained tok/s is 8.1 tok/s after thermal throttle (source 87:
+−13% on desktop CPU at 30 min) and calibration error (u = 0.6 when actual u ≈ 0.55 for
+this machine).  They are barely above their SLA.
+
+**Root cause:** The default u = 0.6 is an untested assumption, not a calibrated measurement.
+Thermal throttle at 30 min (source 87) reduces sustained bandwidth by ~13% on desktop CPU.
+The combination of these two effects can push actual tok/s ~25% below the plan output.
+
+**Mitigation (v0.1):**
+
+- Apply a conservative factor of 0.75 to any `plan` tok/s output for SLA planning:
+  `12.4 × 0.75 = 9.3 tok/s effective SLA estimate`.
+- For sustained sessions (> 15 minutes), apply 0.70 (accounts for both calibration gap
+  and thermal degradation).
+- For latency-critical paths: measure actual tok/s on the target hardware with a representative
+  prompt and use the measurement, not the plan output.
+
+**v0.2 fix:** The `calibrate` module measures on-device tok/s, fits u, and reports held-out
+MAPE with a bootstrap CI.  After calibration, the plan output carries the error bar:
+`decode_tok_s: 10.3 tok/s (held-out MAPE: 8.4% ± 3.1 pp, 95% CI)`.  Users can trust
+the interval for SLA planning instead of applying arbitrary discounts.
+
+**Failure mode: bootstrap CI absent for < 4 measurements (Low likelihood, Low severity)**
+
+A user runs `fitsproof calibrate` on a machine with only 3 timing samples (the minimum grid
+size).  Under v0.2, the output will read: `held_out_mape: null, note: "n_total < 4 — fit-all,
+no held-out evaluation"` (per OQ-C7-1 minimum-n rule).  The user may be confused that
+calibration succeeded (u was fitted) but no confidence interval was reported.
+
+**Mitigation:** The calibrate CLI should print a clear message:
+```
+Fitted u = 0.71 from 3 measurements (fit-all: not enough for held-out evaluation).
+To get an honest CI, add at least 3 more measurements (fitsproof calibrate --add-run ...).
+```
+
+### 17.4 — Operational cost of the calibration path (v0.2 preview)
+
+**When calibrate becomes available (v0.2):**
+
+| Operation | Time | Frequency |
+|---|---|---|
+| `fitsproof calibrate --runs 6 --repeats 3` | ~3 minutes (6 × 3 repeats × ~10s/run) | Once per machine type |
+| `fitsproof calibrate --add-run` | ~30s (1 run × 3 repeats) | When hardware changes |
+| Resulting plan quality | ±8–10% MAPE (at n=6) | Until re-calibrated |
+
+The 3-minute calibration is the primary operational cost.  Once done, `plan` and `admit` use
+the calibrated u automatically.  The calibration result is stored in a sidecar file
+(proposed: `~/.fitsproof/calibration.json`) and re-used across sessions.
+
+**v0.1 operational cost:** zero for calibration (no measurement path exists); the price is
+lower tok/s prediction accuracy (±25–40% vs ±8–10% calibrated).
+
+### 17.5 — Updated non-adoption reason (cycle 7)
+
+The cycle 6 non-adoption reason (§16.3 implicit, §10 explicit) was: `verify` runs on the
+reference bundle, not real models; the `serve`/`mcp`/`pareto` surfaces exit 2 at the CLI;
+the bpw formula is optimistic for K-quant formats.
+
+**Cycle 7 adds one more concrete non-adoption reason:**
+
+**The tok/s prediction has no stated confidence interval, and the calibration module
+does not exist yet.**
+
+A team comparing fitsproof-rs to ridgepoint (1% MAPE on A100/H100, source 82/MARKET-VERDICTS.md)
+will notice that ridgepoint reports calibrated predictions.  fitsproof-rs v0.1's tok/s number is a
+formula evaluation with no empirical backing — neither the prediction error nor the utilisation
+constant has been measured on the actual hardware.
+
+For teams where throughput prediction accuracy matters (latency SLAs, cloud cost estimation,
+hardware sizing for new purchases), this is the strongest argument against adoption at v0.1.
+
+**Why the byte-based enforcement is still worth adopting before v0.2:**
+
+The pre-flight contract (`admit()`, `stress`, typed degradation records, VmHWM delta) all operate
+on byte predictions, which are deterministic formulas with no calibration dependency.  The
+calibration gap affects only the advisory tok/s output.  A team that cares about OOM prevention
+and not throughput planning gets full value from v0.1.  A team that cares about both should wait
+for v0.2 or measure throughput independently.
+
+**Summary (cycle 7):**
+
+| Question | Cycle 7 answer |
+|---|---|
+| Should I use v0.1 for OOM prevention? | Yes — full pre-flight contract works today |
+| Should I use v0.1 for throughput SLA planning? | No — apply ×0.75 discount and measure independently |
+| Should I combine with llmfit? | Yes — llmfit discovers; fitsproof-rs enforces; they compose cleanly |
+| What is the v0.2 improvement? | Calibrated tok/s with held-out MAPE and bootstrap 95% CI |
+| How much does calibration cost? | ~3 minutes per machine, once |
+
+---
+
+*Cycle 7 additions written 2026-10-27.  Sources: RESEARCH.md §§93-110 (cycle 7 passes 1-2).*
