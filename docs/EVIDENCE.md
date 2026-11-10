@@ -1755,7 +1755,7 @@ cat reports/mutation-c6.json
 {
   "cycle": 6,
   "tool": "cargo-mutants",
-  "command": "/home/openclaw/.cargo/bin/cargo mutants --no-times --no-shuffle",
+  "command": "cargo mutants --no-times --no-shuffle",
   "rc": 124,
   "killed": 1,
   "total": 3,

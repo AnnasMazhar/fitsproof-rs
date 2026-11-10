@@ -11121,8 +11121,8 @@ fn median_even_n_convention_matches_numpy() {
     let v = vec![3.0f64, 1.0, 4.0, 2.0];
     assert_eq!(median(v.clone()), 2.5);
     // Known-answer: np.median([5.0, 1.0, 3.0]) = 3.0
-    let v3 = vec![5.0f64, 1.0, 3.0];
-    assert_eq!(median(v3), 3.0);
+    let odd = vec![5.0f64, 1.0, 3.0];
+    assert_eq!(median(odd), 3.0);
 }
 ```
 
